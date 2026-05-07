@@ -32,6 +32,7 @@ backend/                    FastAPI 应用 + Celery worker
       model_registry.py     **路由权威源** — resolve_provider(model) 按前缀/关键字定 provider；strip_provider_prefix() 去掉 flow2api/holo/grok 显式前缀
       dispatcher.py         **worker 唯一入口** — dispatch_generate()，按 provider 分发 + 调用日志埋点
       call_logger.py        record_api_call / complete_api_call (短事务，不依赖外部 db)
+      followmeee_auth.py    集中身份代理：verify_via_followmeee() 调 followmeee.co/api/login + extract_is_admin/display_name
     workers/                Celery 任务
       tasks.py              process_generation 主入口
       director_worker.py    导演模式（锚点 → 并行帧）
@@ -126,6 +127,13 @@ alembic upgrade head
   - `providerOf(model) === 'flow2api'` → 走 `mapModelForFlow2API()`（含 `_ultra` 别名）
   - `gemini-*` 短别名 → 用 `ORIENT_SUFFIX_RE` 检查是否已带方向后缀，避免 `gemini-3.1-flash-image-portrait-portrait` 双后缀
   - HOLO 视频实名 → r2v 模式时把 `_i2v_*_` 前缀替换为 `_r2v_*_`
+- **登录代理 followmeee.co + 离线 admin 兜底**。`/api/auth/login` 不再用本地 bcrypt 验密，而是调 `FOLLOWMEEE_AUTH_URL/api/login`（默认 `https://followmeee.co`）：
+  - 上游 200 → `_lazy_upsert_user()` 在本地 users 表懒建一行（hashed_password=`!followmeee-managed`，永远 verify=False，外键 tasks.user_id 等仍可用）→ 签 api-flow 自己的 JWT。前端零改动。
+  - 上游 5xx / 网络错 → 标记 `upstream_unreachable`，进兜底
+  - **离线 admin 兜底**：当 username == `EMERGENCY_ADMIN_USERNAME` 且 `verify_password(pwd, EMERGENCY_ADMIN_PASSWORD_HASH)` 通过时放行（hash 在 `.env`，留空则关闭兜底通道）。
+  - **本地注册已禁用**：`POST /api/auth/register` 返回 410 Gone，账户统一在 https://followmeee.co/manage 管理。
+  - **`is_admin` 判定**：`extract_is_admin(upstream)` 兼容多种 shape (`user.is_admin` / `user.role==admin` / 顶层 `is_admin`)；followmeee.co 实际响应字段如有变化，改这一个函数即可。
+- **docker-compose `env_file` 会对 `$` 做变量插值**。bcrypt hash 里的 `$2b$12$...` 必须在 `.env` 写成 `$$2b$$12$$...`（双写转义），否则 `$abc` 会被当作未设变量替换为空，hash 被破坏。同样适用任何含 `$` 的密码/token。
 - **静态挂载 30 天 immutable 缓存**。`/outputs` 和 `/uploads` 路径走 `add_cache_headers` 中间件，文件名是 UUID 所以这样安全。
 - **Toolbox 下拉的真正实现是 `Utility/ToolPanel.jsx`**（不是 `Toolbox/Toolbox.jsx`）。`/t2i /i2i /t2v /i2v` 全部走 ToolPanel 的硬编码 option 列表 + 三 provider optgroup 分组渲染。改下拉**只改 ToolPanel.jsx**。
 - **Windows + Docker Desktop rebuild 前端时的两个坑**：
