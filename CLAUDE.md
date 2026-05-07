@@ -118,7 +118,14 @@ alembic upgrade head
 - **凭据全部 .env 系统级**（内部使用，不暴露 UI）。三套独立配置：`HOLO_API_URL/KEY` (`api.dealonhorizon.us`)、`FLOW2API_URL/KEY` (`https://followmeee.co`)、`GROK_API_URL/KEY` (`38.64.57.216:8001`)。`AI_API_URL/KEY` 是兼容兜底字段。`system_settings.veo_api_key/gemini_api_key` 是 dead column，不再读。
 - **模型名别名**：HOLO 不认 `*_ultra` / `*_ultra_relaxed` / `*_ultra_fl` 这些 Flow2API 时代命名。`ai_service.py::LEGACY_MODEL_ALIASES` 是兜底翻译表（旧名 → HOLO 实名，e.g. `_ultra_relaxed` → `lite`、`_ultra` → `fast`）。
 - **HOLO 失败语义**：HOLO 自动退款 `failed`/`cancelled` 任务，`_generate_holo` 在 `result` 上挂 `_terminal=True` + `_refunded`，`generate_with_retry` 看到 `_terminal` 立即早退（不走 3 次重试，避免内容策略失败烧配额）。同时 `_holo_task_id` / `_cost` 也通过 result 回传给 dispatcher 写入日志。
-- **ApiCallLog 是审计而非账单**。本地表只记"谁/什么时候/为什么调用了什么"，HOLO 的钱以 `/me/transactions` 官方接口为准。`/api/logs` 路由按 `username == "admin"` 判管理员，能筛全用户；普通用户强制 `user_id=self`。
+- **ApiCallLog 是审计而非账单**。本地表只记"谁/什么时候/为什么调用了什么"，HOLO 的钱以 `/me/transactions` 官方接口为准。
+  - `/api/logs` 路由按 `username == "admin"` 判管理员，能筛全用户；普通用户强制 `user_id=self`。
+  - `/api/logs/balance` + `/api/logs/transactions` 是**账户级共享数据（同一把 HOLO key 的余额/账单），仅 admin 可访问**，普通用户 403；前端 `Logs.jsx` 检查 `is_admin` 后再渲染 KPI 条和 HOLO 账单 Tab。
+- **前端 submit 按 `providerOf(model)` 分发，不依赖全局 provider**。`ToolPanel.jsx` / `Toolbox.jsx` 的 `finalModel` 拼装路径：
+  - `flow2api/` 显式前缀 → 直接传（dispatcher 后端 strip 前缀）
+  - `providerOf(model) === 'flow2api'` → 走 `mapModelForFlow2API()`（含 `_ultra` 别名）
+  - `gemini-*` 短别名 → 用 `ORIENT_SUFFIX_RE` 检查是否已带方向后缀，避免 `gemini-3.1-flash-image-portrait-portrait` 双后缀
+  - HOLO 视频实名 → r2v 模式时把 `_i2v_*_` 前缀替换为 `_r2v_*_`
 - **静态挂载 30 天 immutable 缓存**。`/outputs` 和 `/uploads` 路径走 `add_cache_headers` 中间件，文件名是 UUID 所以这样安全。
 - **Toolbox 下拉的真正实现是 `Utility/ToolPanel.jsx`**（不是 `Toolbox/Toolbox.jsx`）。`/t2i /i2i /t2v /i2v` 全部走 ToolPanel 的硬编码 option 列表 + 三 provider optgroup 分组渲染。改下拉**只改 ToolPanel.jsx**。
 - **Windows + Docker Desktop rebuild 前端时的两个坑**：
