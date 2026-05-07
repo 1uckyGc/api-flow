@@ -1,0 +1,535 @@
+import asyncio
+import base64
+import json
+import logging
+import os
+import re
+import subprocess
+import tempfile
+from typing import Optional, Callable
+
+import httpx
+from app.config import settings
+
+from app.utils.logger import logger
+
+class GenerationResult:
+    def __init__(self, success: bool=False, media_type: str="", data: bytes=b"", mime_type: str="", error: str="", file_ext: str=""):
+        self.success = success
+        self.media_type = media_type
+        self.data = data
+        self.mime_type = mime_type
+        self.error = error
+        self.file_ext = file_ext
+
+def get_mime_type(image_path: str) -> str:
+    ext = os.path.splitext(image_path)[1].lower()
+    mime_map = {
+        ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+        ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
+    }
+    return mime_map.get(ext, "image/jpeg")
+
+def image_to_base64_sync(image_path: str) -> str:
+    with open(image_path, "rb") as f:
+        return base64.b64encode(f.read()).decode("utf-8")
+
+def extract_last_frame_base64_sync(video_path: str) -> str:
+    """提取视频尾帧并返回 base64 图像，用于视频延长接力"""
+    try:
+        cmd_fps = [
+            'ffprobe', '-v', 'error', '-select_streams', 'v:0', 
+            '-show_entries', 'stream=nb_frames', 
+            '-of', 'default=noprint_wrappers=1:nokey=1', video_path
+        ]
+        output = subprocess.check_output(cmd_fps, stderr=subprocess.STDOUT).decode('utf-8').strip().split('\n')
+        total_frames = int(output[0]) if output and output[0].isdigit() else 1
+        
+        target_frame = max(0, total_frames - 1)
+        
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            tmp_name = tmp.name
+            
+        try:
+            # 使用 -sseof -0.1 直接定位到视频末尾取最后一帧，速度快且兼容性好
+            cmd_extract = [
+                'ffmpeg', '-y', '-sseof', '-0.1', '-i', video_path, 
+                '-vframes', '1', '-q:v', '2', tmp_name
+            ]
+            subprocess.check_call(cmd_extract, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
+            with open(tmp_name, "rb") as f:
+                return base64.b64encode(f.read()).decode("utf-8")
+        finally:
+            if os.path.exists(tmp_name):
+                os.remove(tmp_name)
+    except Exception as e:
+        logger.error(f"Failed to extract last frame from {video_path}: {e}")
+        raise ValueError(f"无法提取视频尾帧: {e}")
+
+class AIClient:
+    def __init__(self):
+        self.base_url = settings.AI_API_URL.rstrip("/")
+        self.api_key = settings.AI_API_KEY
+        self._http_pool: httpx.AsyncClient | None = None
+        self._http_pool_loop_id: int | None = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        current_loop = asyncio.get_running_loop()
+        current_loop_id = id(current_loop)
+        
+        # --- 核心修复：检查当前 Loop 是否与连接池绑定的一致 ---
+        # 如果当前没有池子，或者池子已经关闭，或者池子对应的 Loop 已销毁 (ID 不匹配)，则重建
+        if (self._http_pool is None or 
+            self._http_pool.is_closed or 
+            self._http_pool_loop_id != current_loop_id):
+            
+            if self._http_pool and not self._http_pool.is_closed:
+                logger.warning(f"检测到 Loop 漂移 (old:{self._http_pool_loop_id} -> new:{current_loop_id}), 正在销毁旧连接池。")
+                # 尽量优雅关闭旧池子，但不等待
+                asyncio.create_task(self._http_pool.aclose())
+            
+            # 创建新连接池并绑定当前 Loop ID
+            self._http_pool = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=30.0))
+            self._http_pool_loop_id = current_loop_id
+            logger.info(f"已为 Loop {current_loop_id} 创建全新的 httpx 连接池。")
+            
+        return self._http_pool
+
+    def _headers(self) -> dict:
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+    async def _build_messages(self, prompt: str, image_paths: list[str] | None = None) -> list[dict]:
+        if not image_paths:
+            return [{"role": "user", "content": prompt}]
+
+        content_parts: list[dict] = [{"type": "text", "text": prompt}]
+        for img_path in image_paths:
+            try:
+                if img_path.lower().endswith(".mp4"):
+                    mime = "image/jpeg"
+                    b64 = await asyncio.to_thread(extract_last_frame_base64_sync, img_path)
+                else:
+                    mime = get_mime_type(img_path)
+                    b64 = await asyncio.to_thread(image_to_base64_sync, img_path)
+                    
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{b64}"},
+                })
+            except Exception as e:
+                logger.error(f"Error loading image {img_path}: {e}")
+                
+        return [{"role": "user", "content": content_parts}]
+
+    async def _detect_file_type(self, result: GenerationResult, is_video: bool) -> GenerationResult:
+        data = result.data
+        if not data or len(data) < 4:
+            return result
+
+        if data.startswith(b"\x89PNG"):
+            result.mime_type, result.file_ext, result.media_type = "image/png", ".png", "image"
+        elif data.startswith(b"\xff\xd8"):
+            result.mime_type, result.file_ext, result.media_type = "image/jpeg", ".jpg", "image"
+        elif data.startswith(b"RIFF") and len(data) > 11 and data[8:12] == b"WEBP":
+            result.mime_type, result.file_ext, result.media_type = "image/webp", ".webp", "image"
+        elif b"ftyp" in data[:32]:
+            result.mime_type, result.file_ext, result.media_type = "video/mp4", ".mp4", "video"
+        else:
+            if is_video:
+                result.media_type, result.mime_type, result.file_ext = "video", "video/mp4", ".mp4"
+            else:
+                result.media_type, result.mime_type, result.file_ext = "image", "image/png", ".png"
+        return result
+
+    async def generate_with_retry(
+        self, model: str, prompt: str, image_paths: list[str] = None, max_retries: int = 3,
+        progress_callback: Callable[[str], None] = None,
+        api_key: str = None, allow_fallback: bool = False
+    ) -> GenerationResult:
+        """带重试机制的生成接口"""
+        last_error = ""
+        actual_retries = max_retries if max_retries > 0 else 3
+        for attempt in range(actual_retries + 1):
+            current_model = model
+
+            try:
+                if progress_callback:
+                    if attempt > 0:
+                        await progress_callback(f"[重试 {attempt}/{actual_retries}] 正在重新提交...")
+                    else:
+                        await progress_callback("正在准备发送请求...")
+                        
+                result = await self.generate(current_model, prompt, image_paths, progress_callback, api_key=api_key)
+                if result.success:
+                    return result
+                
+                error_str = str(result.error)
+                last_error = error_str
+                logger.warning(f"Generation attempt {attempt + 1} failed: {error_str}")
+
+            except Exception as e:
+                last_error = str(e)
+                logger.warning(f"Generation attempt {attempt + 1} raised error: {last_error}")
+            
+            if attempt < actual_retries:
+                # 指数级退避等待重试
+                await asyncio.sleep(2 ** attempt)
+
+        # 最终失败
+        res = GenerationResult()
+        res.error = f"Max retries ({actual_retries}) reached. Last error: {last_error}"
+        return res
+
+    async def generate(self, model: str, prompt: str, image_paths: list[str] | None = None, progress_callback: Callable[[str], None] = None, api_key: str = None) -> GenerationResult:
+        url = f"{self.base_url}/v1/chat/completions"
+        messages = await self._build_messages(prompt, image_paths)
+        payload = {"model": model, "messages": messages, "stream": True}
+        result = GenerationResult()
+        is_video = any(k in model.lower() for k in ["veo", "t2v", "i2v", "r2v"])
+
+        active_key = api_key if api_key else self.api_key
+        headers = {
+            "Authorization": f"Bearer {active_key}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            from app.utils.scheduler import wait_for_api_slot
+            await wait_for_api_slot(api_type="gemini_veo")
+
+            client = await self._get_client()
+            collected_content = ""
+            async with client.stream("POST", url, json=payload, headers=headers) as response:
+                if response.status_code != 200:
+                    err_body = await response.aread()
+                    result.error = f"HTTP {response.status_code}: {err_body.decode('utf-8', errors='replace')}"
+                    return result
+
+                async for line in response.aiter_lines():
+                    if not line.startswith("data: "): continue
+                    data_str = line[6:].strip()
+                    if data_str == "[DONE]": break
+                    try:
+                        chunk = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        logger.debug(f"Skipped non-JSON SSE chunk: {data_str[:100]}")
+                        continue
+                        
+                    if "error" in chunk:
+                        err_info = chunk["error"]
+                        result.error = err_info.get("message", str(err_info)) if isinstance(err_info, dict) else str(err_info)
+                        return result
+
+                    choices = chunk.get("choices", [])
+                    if choices and choices[0].get("delta", {}).get("content"):
+                        collected_content += choices[0]["delta"]["content"]
+                        if progress_callback:
+                            lines = [ln.strip() for ln in collected_content.split('\n') if ln.strip()]
+                            if lines:
+                                last_line = lines[-1]
+                                if "http" not in last_line and "![" not in last_line and "{" not in last_line:
+                                    msg = last_line[:50]
+                                    if msg:
+                                        await progress_callback(msg)
+
+            if not collected_content:
+                result.error = "服务器未返回任何内容"
+                return result
+
+            try:
+                err_obj = json.loads(collected_content.strip())
+                if isinstance(err_obj, dict) and "error" in err_obj:
+                    result.error = str(err_obj["error"])
+                    return result
+            except ValueError:
+                pass
+                
+            # Parse Results
+            img_match = re.search(r"!\[.*?\]\(data:(image/\w+);base64,([A-Za-z0-9+/=\s]+)\)", collected_content)
+            if img_match:
+                result.data = base64.b64decode(img_match.group(2).replace("\n", "").replace(" ", ""))
+                result.success = True
+                result.mime_type = img_match.group(1)
+                result.media_type = "image"
+                return await self._detect_file_type(result, is_video)
+
+            url_match = re.search(r"(https?://[^\s\)\"\[\]]+)", collected_content)
+            if url_match:
+                file_url = url_match.group(1).rstrip(")'\",;")
+                # 下载阶段独立重试逻辑 (针对高并发下可能出现的 Server disconnected / Peer closed)
+                for dl_attempt in range(3):
+                    try:
+                        if progress_callback and dl_attempt > 0:
+                            await progress_callback(f"正在重试下载 ({dl_attempt}/3)...")
+                        
+                        dl_response = await client.get(
+                            file_url, 
+                            timeout=httpx.Timeout(400.0, connect=60.0, read=400.0), 
+                            follow_redirects=True
+                        )
+                        if dl_response.status_code == 200:
+                            result.data = dl_response.content
+                            if len(result.data) > 100:
+                                result.success = True
+                                return await self._detect_file_type(result, is_video)
+                            result.error = f"下载的数据过小 ({len(result.data)} bytes)"
+                        else:
+                            result.error = f"下载文件失败: HTTP {dl_response.status_code}"
+                        
+                        # 如果是业务逻辑错误（如404），直接跳出不再重试
+                        break
+                    except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError) as e:
+                        logger.warning(f"Download attempt {dl_attempt+1} failed for {file_url}: {e}")
+                        if dl_attempt == 2:
+                            result.error = f"下载文件异常 (多次重试失败): {str(e)}"
+                        await asyncio.sleep(1)
+                    except Exception as e:
+                        result.error = f"下载文件出现未知异常: {str(e)}"
+                        break
+                return result
+
+            # 如果完全没匹配到任何媒体特征
+            try:
+                maybe_err = json.loads(collected_content.strip())
+                if isinstance(maybe_err, dict) and "error" in maybe_err:
+                    result.error = str(maybe_err["error"])
+                    return result
+            except (ValueError, json.JSONDecodeError):
+                pass
+
+            result.data = collected_content.encode("utf-8")
+            result.error = f"无法解析生成结果格式: {collected_content[:200]}"
+            
+        except Exception as e:
+            logger.error(f"Image generation failed: {e}")
+            return GenerationResult(success=False, error=str(e))
+
+# 全局单例
+ai_client = AIClient()
+
+async def generate_fission_prompts(global_prompt: str, count: int, image_paths: list[str] = None, progress_callback: Callable[[str], None] = None) -> list[str]:
+    """
+    调用 LLM (支持多模态) 对模糊全局提示词进行裂变扩写
+    """
+    from app.prompts import (
+        LLM_SYSTEM_PROMPT,
+        LLM_USER_PROMPT_GLOBAL,
+        LLM_USER_PROMPT_COUNT,
+        LLM_USER_PROMPT_MAIN,
+        LLM_REASONER_FORMAT_PROMPT
+    )
+    
+    api_key = settings.DEEPSEEK_API_KEY
+    if not api_key:
+        logger.error("DEEPSEEK_API_KEY is not configured.")
+        raise RuntimeError("系统未配置 DEEPSEEK_API_KEY，无法执行裂变推理")
+
+    if progress_callback:
+        await progress_callback("DeepSeek 推理引擎已启动，正在分析全局需求...")
+
+    # 1. 组装 Prompt
+    system_msg = LLM_SYSTEM_PROMPT.replace("{count}", str(count))
+    user_msg_parts = [
+        LLM_USER_PROMPT_GLOBAL.replace("{global_prompt}", global_prompt),
+        LLM_USER_PROMPT_COUNT.replace("{count}", str(count)),
+        LLM_USER_PROMPT_MAIN
+    ]
+    user_msg = "\n".join(user_msg_parts)
+
+    prompt_context = "\n".join(user_msg_parts)
+    messages = [{"role": "system", "content": system_msg}]
+    
+    # 协议能力判定：仅当模型名包含 vision/vl/gemini/gpt-4o 等关键字时才启用多模态 Image 协议
+    vision_keywords = ["vision", "vl", "gemini", "gpt-4o", "claude"]
+    is_vision_model = any(k in settings.DEEPSEEK_MODEL.lower() for k in vision_keywords)
+
+    if image_paths and is_vision_model:
+        # 构造多模态内容 (如用户所述：Text 居首，多 Image 紧随其后)
+        content_parts: list[dict] = [{"type": "text", "text": prompt_context}]
+        for img_path in image_paths:
+            try:
+                mime = get_mime_type(img_path)
+                b64 = image_to_base64_sync(img_path)
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{b64}"}
+                })
+            except Exception as e:
+                logger.warning(f"Failed to process fission image {img_path}: {e}")
+        messages.append({"role": "user", "content": content_parts})
+    else:
+        # 降级或默认：使用纯文本 String 格式 (针对 deepseek-chat 等)
+        messages.append({"role": "user", "content": prompt_context})
+
+    payload = {
+        "model": settings.DEEPSEEK_MODEL,
+        "messages": messages,
+        "temperature": 0.8,
+        "stream": False,
+        "response_format": {"type": "json_object"}
+    }
+    
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    
+    if progress_callback:
+        await progress_callback("正在构思创意方案，注入光影与构图细节...")
+
+    _ds_client = httpx.AsyncClient(timeout=60.0)
+    retries = 2
+    for attempt in range(retries):
+        try:
+            resp = await _ds_client.post(
+                settings.DEEPSEEK_API_URL, 
+                headers=headers, 
+                json=payload
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            
+            if progress_callback:
+                await progress_callback(f"正在对 {count} 个裂变变体进行文本对齐与质量校验...")
+
+            content = data["choices"][0]["message"]["content"]
+            parsed = json.loads(content)
+            prompts_list = parsed.get("prompts", [])
+            
+            if not prompts_list:
+                continue
+                
+            # 补齐或截断
+            if len(prompts_list) < count:
+                prompts_list.extend([prompts_list[-1]] * (count - len(prompts_list)))
+            elif len(prompts_list) > count:
+                prompts_list = prompts_list[:count]
+            
+            if progress_callback:
+                await progress_callback(f"创意裂变成功！已就绪 {len(prompts_list)} 组分身指令。")
+                
+            return prompts_list
+                
+        except Exception as e:
+            logger.warning(f"DeepSeek generation attempt {attempt + 1} failed: {e}")
+            if progress_callback:
+                await progress_callback(f"尝试第 {attempt+1} 次重连推理引擎...")
+            # 如果是 JSON 解析错，尝试给下一轮加上 Reasoner 强约束
+            payload["messages"].append({
+                "role": "user", 
+                "content": LLM_REASONER_FORMAT_PROMPT
+            })
+            
+    logger.error("All attempts to generate fission prompts failed.")
+    raise RuntimeError("DeepSeek 引擎响应超时或格式错误，无法生成创意分身")
+
+
+async def generate_director_scene_prompts(
+    script: str,
+    count: int,
+    style: str = "",
+    character_desc: str = "",
+    product_image_paths: list[str] = None,
+    progress_callback: Callable[[str], None] = None,
+) -> list[dict]:
+    """
+    导演模式 Phase 1：调用 LLM 将剧本解析为 n 个结构化分镜描述。
+    返回列表，每个元素形如：
+      {"index": 1, "shot_type": "中景", "action": "...", "description": "..."}
+    """
+    from app.prompts import DIRECTOR_LLM_SYSTEM_PROMPT
+
+    api_key = settings.DEEPSEEK_API_KEY
+    if not api_key:
+        raise RuntimeError("系统未配置 DEEPSEEK_API_KEY，无法执行导演模式剧本解析")
+
+    if progress_callback:
+        await progress_callback("导演引擎启动，正在解析剧本结构...")
+
+    system_msg = DIRECTOR_LLM_SYSTEM_PROMPT.replace("{count}", str(count))
+
+    user_parts = [f"【剧本内容】：\n{script}"]
+    if style:
+        user_parts.append(f"【全局风格设定】：{style}")
+    if character_desc:
+        user_parts.append(f"【人物外形描述】：{character_desc}")
+    user_parts.append(f"请严格按照以上信息，生成 {count} 个连贯的分镜描述。")
+    user_msg = "\n\n".join(user_parts)
+
+    messages = [{"role": "system", "content": system_msg}]
+
+    vision_keywords = ["vision", "vl", "gemini", "gpt-4o", "claude"]
+    is_vision_model = any(k in settings.DEEPSEEK_MODEL.lower() for k in vision_keywords)
+
+    if product_image_paths and is_vision_model:
+        content_parts: list[dict] = [{"type": "text", "text": user_msg}]
+        for img_path in product_image_paths:
+            try:
+                mime = get_mime_type(img_path)
+                b64 = image_to_base64_sync(img_path)
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{b64}"}
+                })
+            except Exception as e:
+                logger.warning(f"Director: failed to load product image {img_path}: {e}")
+        messages.append({"role": "user", "content": content_parts})
+    else:
+        messages.append({"role": "user", "content": user_msg})
+
+    payload = {
+        "model": settings.DEEPSEEK_MODEL,
+        "messages": messages,
+        "temperature": 0.75,
+        "stream": False,
+        "response_format": {"type": "json_object"},
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    if progress_callback:
+        await progress_callback(f"正在将剧本拆解为 {count} 个分镜指令...")
+
+    retries = 2
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        for attempt in range(retries):
+            try:
+                resp = await client.post(settings.DEEPSEEK_API_URL, headers=headers, json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+                content = data["choices"][0]["message"]["content"]
+                parsed = json.loads(content)
+                scenes = parsed.get("scenes", [])
+                
+                # 显式排序：核心修复，确保 index 对应列表物理位置
+                scenes.sort(key=lambda x: x.get("index", 0))
+
+                if not scenes:
+                    raise ValueError("LLM 返回的 scenes 列表为空")
+
+                # 补齐或截断
+                if len(scenes) < count:
+                    scenes.extend([scenes[-1]] * (count - len(scenes)))
+                elif len(scenes) > count:
+                    scenes = scenes[:count]
+
+                if progress_callback:
+                    await progress_callback(f"剧本解析完成，共 {len(scenes)} 个分镜就绪。")
+
+                return scenes
+
+            except Exception as e:
+                logger.warning(f"Director scene prompts attempt {attempt + 1} failed: {e}")
+                if attempt < retries - 1:
+                    payload["messages"].append({
+                        "role": "user",
+                        "content": "请务必仅返回 JSON 格式数据，确保可被 json.loads 解析。"
+                    })
+
+    raise RuntimeError("DeepSeek 导演引擎响应超时或格式错误，无法解析剧本分镜")

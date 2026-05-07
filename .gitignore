@@ -1,0 +1,71 @@
+# ─── Secrets ──────────────────────────────────────────────────────────
+# 真实 .env 永远不入库；.env.example 作为模板可入库
+.env
+.env.local
+.env.production
+.env.*.local
+backend/.env
+!backend/.env.example
+
+# ─── Python ────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# 虚拟环境（任何位置）
+venv/
+.venv/
+env/
+ENV/
+
+# ─── Node / 前端 ───────────────────────────────────────────────────────
+node_modules/
+frontend/dist/
+frontend/.vite/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ─── 项目运行时数据 ────────────────────────────────────────────────────
+# 用户上传的素材（283MB 历史）、AI 生成结果、运行日志、SQLite 文件
+backend/uploads/
+backend/outputs/
+backend/logs/
+backend/*.db
+backend/*.sqlite
+backend/*.sqlite3
+
+# 历史调试脚本生成的临时文件
+backend/tmp_*.json
+
+# 误手在 Windows 资源管理器留下的"新建文件夹"垃圾目录
+backend/app/utils/新建文件夹/
+
+# ─── IDE / 编辑器 ──────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ─── OS ────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─── Docker / 构建产物 ─────────────────────────────────────────────────
+*.pid
+
+# ─── Claude / Agent 配置（个人本地，不入库）────────────────────────────
+.claude/

@@ -1,0 +1,24 @@
+from celery import Celery
+from app.config import settings
+import os
+
+# 确保 uploads 和 outputs 目录存在
+os.makedirs("uploads", exist_ok=True)
+os.makedirs("outputs", exist_ok=True)
+
+celery_app = Celery(
+    "followmeeeaigc",
+    broker=settings.CELERY_BROKER_URL,
+    backend=settings.CELERY_RESULT_BACKEND,
+    include=["app.workers.tasks", "app.workers.director_worker", "app.workers.workflow_worker"]
+)
+
+celery_app.conf.update(
+    task_serializer="json",
+    accept_content=["json"],
+    result_serializer="json",
+    timezone="Asia/Shanghai",
+    enable_utc=True,
+    task_track_started=True,
+    task_always_eager=settings.CELERY_TASK_ALWAYS_EAGER,
+)
