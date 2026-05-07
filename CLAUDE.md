@@ -9,7 +9,7 @@
 | **后端** | Python 3.10 · FastAPI · SQLAlchemy 2 · Alembic · Celery 5 |
 | **前端** | React 18 · Vite 5 · Zustand · TailwindCSS · React Router 6 |
 | **存储** | PostgreSQL 15（关系数据） · Redis 7（broker + result backend） |
-| **AI 网关** | **双协议并存**：HOLO API（`api.dealonhorizon.us`，异步提交-轮询-下载）或 Flow2API（OpenAI 兼容 SSE 流式）。`.env` 的 `AI_PROVIDER=holo\|flow2api` 切换；DeepSeek 做提示词扩写 |
+| **AI 网关** | **三家并存按模型名分发**：HOLO（`api.dealonhorizon.us`，异步轮询）、Flow2API（`followmeee.co`，OpenAI 兼容 SSE）、Grok2API（`grok-imagine-*`，多端点）。`AI_PROVIDER` 仅作未命中模型时的兜底；DeepSeek 做提示词扩写 |
 | **实时通信** | WebSocket（按用户分发，见 `backend/app/routers/ws.py`） |
 | **容器** | docker-compose，5 个服务（db / redis / backend / worker / frontend） |
 
@@ -21,27 +21,37 @@
 backend/                    FastAPI 应用 + Celery worker
   app/
     main.py                 FastAPI 入口，挂载 /outputs 与 /uploads
-    config.py               pydantic-settings，读取 .env
+    config.py               pydantic-settings；含 HOLO_/FLOW2API_/GROK_ 三套独立凭据
     database.py             SQLAlchemy engine + Base
-    models/                 ORM 模型 — user / task / workflow / settings
-    routers/                HTTP + WebSocket 端点
+    models/                 ORM — user / task / workflow / settings / api_call_log
+    routers/                HTTP + WebSocket 端点（auth, tasks, ws, settings, director, workflows, config, logs）
     schemas/                Pydantic 请求/响应结构
-    services/ai_service.py  AI 网关客户端（httpx 流式 SSE + 重试）
-    workers/                Celery 任务 — 通用生成 + director + workflow
-    workers/celery_app.py   Celery 工厂
+    services/
+      ai_service.py         HOLO + Flow2API 客户端 (AIClient) — submit/poll/download + SSE
+      grok_client.py        Grok2API 客户端 (T2I/I2I/T2V/I2V)
+      model_registry.py     **路由权威源** — resolve_provider(model) 按前缀/关键字定 provider；strip_provider_prefix() 去掉 flow2api/holo/grok 显式前缀
+      dispatcher.py         **worker 唯一入口** — dispatch_generate()，按 provider 分发 + 调用日志埋点
+      call_logger.py        record_api_call / complete_api_call (短事务，不依赖外部 db)
+    workers/                Celery 任务
+      tasks.py              process_generation 主入口
+      director_worker.py    导演模式（锚点 → 并行帧）
+      workflow_worker.py    创意工坊运行实例
+      cleanup_tasks.py      celery beat：每天 03:30 清理 30 天前的 ApiCallLog
+      celery_app.py         Celery 工厂 + beat schedule
     prompts.py              提示词模板中心（LLM + 图像）
     utils/                  scheduler（限流）/ file_cleanup / logger
-  alembic/                  数据库迁移
+  alembic/                  数据库迁移（head: b7c91e2f4d10_add_api_call_log）
   uploads/                  用户上传（挂载在 /uploads）
   outputs/                  AI 生成结果（挂载在 /outputs）
 frontend/                   Vite + React 单页应用
   src/
     App.jsx                 路由表；除 /login 外全部 token 鉴权
-    api/client.js           axios 实例 + 鉴权拦截器
-    pages/                  顶层工作区 — fission / director / workshop / FissionWorkspace
+    api/                    axios 实例 + 各业务 endpoint 客户端（client.js / logs.js / ...）
+    pages/                  顶层工作区 — fission / director / workshop / FissionWorkspace / Logs（调用日志页）
     components/             Layout / Inbox / Gallery / Settings / Studio / TaskCreate / Toolbox / Utility
+    constants/models.js     前端模型注册表（与后端 model_registry.py 对齐 + providerOf() 前缀检测）
     stores/                 Zustand store — auth / settings / task / theme / workshop
-docker-compose.yml          5 服务编排
+docker-compose.yml          5 服务编排（worker 命令带 -B 启用 celery beat）
 ```
 
 ## 模式地图
@@ -53,8 +63,9 @@ docker-compose.yml          5 服务编排
 | **裂变（Fission）** | `/fission` | 一图一句话 → DeepSeek 扩写 N 条 → 并行渲染 → 可选批量出视频 |
 | **导演模式（Director）** | `/director` | 剧本 → DeepSeek 拆 N 个分镜 → 锚点帧 → 并行剩余帧 → 可选批量出视频 |
 | **创意工坊（Workshop）** | `/workshop`、`/workshop/build`、`/workshop/run` | 用户自建多步工作流（模板 + 运行实例） |
-| **工具箱（Toolbox）** | `/t2i`、`/i2i`、`/t2v`、`/i2v` | 一次性的 文生图 / 图生图 / 文生视频 / 图生视频 |
+| **工具箱（Toolbox）** | `/t2i`、`/i2i`、`/t2v`、`/i2v` | 一次性的 文生图 / 图生图 / 文生视频 / 图生视频；下拉按 HOLO / Flow2API / Grok 三组分隔 |
 | **资产库** | `/assets` | 全部生成结果的瀑布流画廊 |
+| **调用日志** | `/logs` | 双 Tab：本地 ApiCallLog（含扣费/HOLO_id/状态过滤） + 代理 HOLO `/me/transactions` 官方账单 |
 
 `backend/app/models/task.py::TaskSource` 是 8 种任务来源的唯一定义点（`TOOLBOX`、`GALLERY`、`PIPELINE`、`GALLERY_EXTEND`、`FISSION`、`DIRECTOR`、`DIRECTOR_VIDEO`、`STORYBOARD_FISSION`）。
 
@@ -100,11 +111,19 @@ alembic upgrade head
 - **httpx 连接池绑事件循环。** `services/ai_service.py::AIClient._get_client` 在检测到 loop 漂移时会重建连接池（修 Celery + asyncio 经典踩坑）。**别把 `AIClient` 状态在多个 loop 之间裸共享**。
 - **API 限流就一个入口**：`utils/scheduler.py::wait_for_api_slot`。所有图像、视频上游调用都过这里。
 - **视频延展走尾帧接力**：`extract_last_frame_base64_sync` 用 `ffmpeg -sseof -0.1` 抓视频最后一帧，base64 喂回模型作为下一段的种子。
-- **Key 分两级**：Gemini / Veo key 是按用户存在 `system_settings` 里的；DeepSeek key 是系统级的（`.env`）。`_get_user_api_key` 按模型名关键字选用户那把。HOLO 模式下两栏可填同一把 HOLO key，留空则回退 `.env` 的 `AI_API_KEY`。
-- **AI provider 切换**：`backend/.env` 的 `AI_PROVIDER` 决定走 HOLO 异步轮询还是 Flow2API SSE 流式。`AIClient.generate()` 是分发器，下沉到 `_generate_holo` 或 `_generate_flow2api`。两个分支的对外契约（`GenerationResult` shape）一致，worker 不感知差异。
-- **模型名别名**：HOLO 不认 `*_ultra` / `*_ultra_relaxed` / `*_ultra_fl` 这些 Flow2API 时代命名。`ai_service.py::LEGACY_MODEL_ALIASES` 是兜底翻译表（旧名 → HOLO 实名，e.g. `_ultra_relaxed` → `lite`、`_ultra` → `fast`）。前端 dropdown 由 `useProvider()` + `constants/models.js` 决定按当前 provider 展示哪一套。
-- **HOLO 失败语义**：HOLO 自动退款 `failed`/`cancelled` 任务，`_generate_holo` 在 `result` 上挂 `_terminal=True`，`generate_with_retry` 看到该标志立即早退，不走 3 次重试（避免在内容策略失败上重复烧配额）。
+- **三 provider 按模型名分发，不再有"全局开关"**。`services/model_registry.py::resolve_provider(model)` 是路由权威：
+  - `grok-` 前缀 → grok；含 `_ultra` 关键字 → flow2api；`GPT-Images` / `gemini-3.` / `imagen-` / `veo_3_` 前缀 → holo；其他 → fallback (`AI_PROVIDER`)
+  - **显式前缀消歧**（最高优先级）：`flow2api/<model>` / `holo/<model>` / `grok/<model>` 用于 HOLO 与 Flow2API 同名模型（如 `gemini-3.1-flash-image-portrait`）。`_generate_*` 入口先 `strip_provider_prefix()` 再发给上游。
+- **dispatcher.py 是 worker 唯一入口**。`tasks.py` 和 `director_worker.py` 都调 `dispatch_generate(...)`，内部按 provider 分发到 `ai_client.generate_with_retry`（HOLO/Flow2API）或 `_run_grok`（含 grok 自带重试 + 视频延展尾帧抽取）。也是写 ApiCallLog 的唯一埋点位置。
+- **凭据全部 .env 系统级**（内部使用，不暴露 UI）。三套独立配置：`HOLO_API_URL/KEY` (`api.dealonhorizon.us`)、`FLOW2API_URL/KEY` (`https://followmeee.co`)、`GROK_API_URL/KEY` (`38.64.57.216:8001`)。`AI_API_URL/KEY` 是兼容兜底字段。`system_settings.veo_api_key/gemini_api_key` 是 dead column，不再读。
+- **模型名别名**：HOLO 不认 `*_ultra` / `*_ultra_relaxed` / `*_ultra_fl` 这些 Flow2API 时代命名。`ai_service.py::LEGACY_MODEL_ALIASES` 是兜底翻译表（旧名 → HOLO 实名，e.g. `_ultra_relaxed` → `lite`、`_ultra` → `fast`）。
+- **HOLO 失败语义**：HOLO 自动退款 `failed`/`cancelled` 任务，`_generate_holo` 在 `result` 上挂 `_terminal=True` + `_refunded`，`generate_with_retry` 看到 `_terminal` 立即早退（不走 3 次重试，避免内容策略失败烧配额）。同时 `_holo_task_id` / `_cost` 也通过 result 回传给 dispatcher 写入日志。
+- **ApiCallLog 是审计而非账单**。本地表只记"谁/什么时候/为什么调用了什么"，HOLO 的钱以 `/me/transactions` 官方接口为准。`/api/logs` 路由按 `username == "admin"` 判管理员，能筛全用户；普通用户强制 `user_id=self`。
 - **静态挂载 30 天 immutable 缓存**。`/outputs` 和 `/uploads` 路径走 `add_cache_headers` 中间件，文件名是 UUID 所以这样安全。
+- **Toolbox 下拉的真正实现是 `Utility/ToolPanel.jsx`**（不是 `Toolbox/Toolbox.jsx`）。`/t2i /i2i /t2v /i2v` 全部走 ToolPanel 的硬编码 option 列表 + 三 provider optgroup 分组渲染。改下拉**只改 ToolPanel.jsx**。
+- **Windows + Docker Desktop rebuild 前端时的两个坑**：
+  - rebuild 后只 recreate frontend 才能生效：`docker compose up -d --force-recreate --no-deps frontend`
+  - BuildKit 多阶段缓存有时复用旧 dist。改源码 vite hash 不变 = build context 没拿到新文件，先 `docker buildx prune -af` 或临时 `DOCKER_BUILDKIT=0 docker compose build --no-cache frontend` 用经典 builder
 - **本备份特有的状态**：
   - `backend/uploads/` 还存着 283 MB 历史用户上传
   - `backend/logs/` 最后一行是 2026-04-29

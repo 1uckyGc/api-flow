@@ -29,6 +29,8 @@ export const VIDEO_MODELS = {
       portrait: [
         { value: 'veo_i2v_ultra', label: 'VEO 3.1 Ultra (极速首尾帧)' },
         { value: 'veo_i2v_ultra_relaxed', label: 'VEO 3.1 Ultra Relax (休闲)' },
+        { value: 'flow2api/veo_3_1_i2v_s_fast_portrait_ultra_fl', label: 'Flow2API · I2V Fast 竖屏' },
+        { value: 'flow2api/veo_3_1_r2v_fast_portrait', label: 'Flow2API · R2V 竖屏 (多图参考)' },
       ],
     },
   },
@@ -63,26 +65,142 @@ export const VIDEO_MODELS = {
       ],
     },
   },
+  grok: {
+    t2v: {
+      landscape: [
+        { value: 'grok-imagine-video', label: 'Grok Imagine Video' },
+      ],
+      portrait: [
+        { value: 'grok-imagine-video', label: 'Grok Imagine Video' },
+      ],
+    },
+    i2v: {
+      landscape: [
+        { value: 'grok-imagine-video', label: 'Grok Imagine Video (I2V)' },
+      ],
+      portrait: [
+        { value: 'grok-imagine-video', label: 'Grok Imagine Video (I2V)' },
+      ],
+    },
+  },
 };
 
 // =====================================================
 // 图像模型（两个 provider 都用同一套 gemini 命名）
 // =====================================================
+// 按 provider 分组的图像模型（让前端 dropdown 可以三组并存）
+export const IMAGE_MODELS_BY_PROVIDER = {
+  holo: {
+    t2i: [
+      { value: 'gemini-3.1-flash-image-portrait', label: 'Gemini 3.1 Flash 竖屏' },
+      { value: 'gemini-3.1-flash-image-landscape', label: 'Gemini 3.1 Flash 横屏' },
+      { value: 'gemini-3.1-flash-image-square', label: 'Gemini 3.1 Flash 方形' },
+      { value: 'gemini-3.0-pro-image-portrait', label: 'Gemini 3.0 Pro 竖屏' },
+      { value: 'gemini-3.0-pro-image-landscape', label: 'Gemini 3.0 Pro 横屏' },
+      { value: 'GPT-Images 2.0', label: 'GPT-Images 2.0 默认' },
+      { value: 'GPT-Images 2.0-1:1', label: 'GPT-Images 2.0 方形' },
+      { value: 'GPT-Images 2.0-16:9', label: 'GPT-Images 2.0 横屏' },
+      { value: 'GPT-Images 2.0-9:16', label: 'GPT-Images 2.0 竖屏' },
+    ],
+    i2i: [
+      { value: 'gemini-3.1-flash-image-portrait', label: 'Gemini 3.1 Flash 竖屏 (R2I)' },
+      { value: 'gemini-3.1-flash-image-landscape', label: 'Gemini 3.1 Flash 横屏 (R2I)' },
+      { value: 'gemini-3.0-pro-image-portrait', label: 'Gemini 3.0 Pro 竖屏 (R2I)' },
+      { value: 'gemini-3.0-pro-image-landscape', label: 'Gemini 3.0 Pro 横屏 (R2I)' },
+      { value: 'GPT-Images 2.0-1:1', label: 'GPT-Images 2.0 方形 (R2I)' },
+      { value: 'GPT-Images 2.0-16:9', label: 'GPT-Images 2.0 横屏 (R2I)' },
+      { value: 'GPT-Images 2.0-9:16', label: 'GPT-Images 2.0 竖屏 (R2I)' },
+    ],
+  },
+  flow2api: {
+    t2i: [
+      { value: 'flow2api/gemini-3.1-flash-image-portrait', label: 'Flow2API · Gemini 3.1 Flash 竖屏' },
+    ],
+    i2i: [],
+  },
+  grok: {
+    t2i: [
+      { value: 'grok-imagine-image', label: 'Grok Imagine 标准' },
+      { value: 'grok-imagine-image-lite', label: 'Grok Imagine Lite (快速)' },
+      { value: 'grok-imagine-image-pro', label: 'Grok Imagine Pro (高质量)' },
+    ],
+    i2i: [
+      { value: 'grok-imagine-image-edit', label: 'Grok Imagine Edit (图像编辑)' },
+    ],
+  },
+};
+
+// 静态访问器：把数据塞进函数体内部字面量，绕过 rollup 把外部对象 IMAGE_MODELS_BY_PROVIDER 整个 tree-shake 掉的 bug
+export function getImageModelsByProvider(provider, kind) {
+  const T2I = {
+    holo: [
+      { value: 'gemini-3.1-flash-image-portrait', label: 'Gemini 3.1 Flash 竖屏' },
+      { value: 'gemini-3.1-flash-image-landscape', label: 'Gemini 3.1 Flash 横屏' },
+      { value: 'gemini-3.1-flash-image-square', label: 'Gemini 3.1 Flash 方形' },
+      { value: 'gemini-3.0-pro-image-portrait', label: 'Gemini 3.0 Pro 竖屏' },
+      { value: 'gemini-3.0-pro-image-landscape', label: 'Gemini 3.0 Pro 横屏' },
+      { value: 'GPT-Images 2.0', label: 'GPT-Images 2.0 默认' },
+      { value: 'GPT-Images 2.0-1:1', label: 'GPT-Images 2.0 方形' },
+      { value: 'GPT-Images 2.0-16:9', label: 'GPT-Images 2.0 横屏' },
+      { value: 'GPT-Images 2.0-9:16', label: 'GPT-Images 2.0 竖屏' },
+    ],
+    flow2api: [
+      { value: 'flow2api/gemini-3.1-flash-image-portrait', label: 'Flow2API · Gemini 3.1 Flash 竖屏' },
+    ],
+    grok: [
+      { value: 'grok-imagine-image', label: 'Grok Imagine 标准' },
+      { value: 'grok-imagine-image-lite', label: 'Grok Imagine Lite (快速)' },
+      { value: 'grok-imagine-image-pro', label: 'Grok Imagine Pro (高质量)' },
+    ],
+  };
+  const I2I = {
+    holo: [
+      { value: 'gemini-3.1-flash-image-portrait', label: 'Gemini 3.1 Flash 竖屏 (R2I)' },
+      { value: 'gemini-3.1-flash-image-landscape', label: 'Gemini 3.1 Flash 横屏 (R2I)' },
+      { value: 'gemini-3.0-pro-image-portrait', label: 'Gemini 3.0 Pro 竖屏 (R2I)' },
+      { value: 'gemini-3.0-pro-image-landscape', label: 'Gemini 3.0 Pro 横屏 (R2I)' },
+      { value: 'GPT-Images 2.0-1:1', label: 'GPT-Images 2.0 方形 (R2I)' },
+      { value: 'GPT-Images 2.0-16:9', label: 'GPT-Images 2.0 横屏 (R2I)' },
+      { value: 'GPT-Images 2.0-9:16', label: 'GPT-Images 2.0 竖屏 (R2I)' },
+    ],
+    flow2api: [],
+    grok: [
+      { value: 'grok-imagine-image-edit', label: 'Grok Imagine Edit (图像编辑)' },
+    ],
+  };
+  const map = kind === 'i2i' ? I2I : T2I;
+  return map[provider] || [];
+}
+
+// 兼容旧调用：扁平合并
 export const IMAGE_MODELS = {
   t2i: [
-    { value: 'gemini-3.1-flash-image-portrait', label: 'Gemini 3.1 Flash 竖屏' },
-    { value: 'gemini-3.1-flash-image-landscape', label: 'Gemini 3.1 Flash 横屏' },
-    { value: 'gemini-3.1-flash-image-square', label: 'Gemini 3.1 Flash 方形' },
-    { value: 'gemini-3.0-pro-image-portrait', label: 'Gemini 3.0 Pro 竖屏' },
-    { value: 'gemini-3.0-pro-image-landscape', label: 'Gemini 3.0 Pro 横屏' },
+    ...IMAGE_MODELS_BY_PROVIDER.holo.t2i,
+    ...IMAGE_MODELS_BY_PROVIDER.flow2api.t2i,
+    ...IMAGE_MODELS_BY_PROVIDER.grok.t2i,
   ],
   i2i: [
-    { value: 'gemini-3.1-flash-image-portrait', label: 'Gemini 3.1 Flash 竖屏 (R2I)' },
-    { value: 'gemini-3.1-flash-image-landscape', label: 'Gemini 3.1 Flash 横屏 (R2I)' },
-    { value: 'gemini-3.0-pro-image-portrait', label: 'Gemini 3.0 Pro 竖屏 (R2I)' },
-    { value: 'gemini-3.0-pro-image-landscape', label: 'Gemini 3.0 Pro 横屏 (R2I)' },
+    ...IMAGE_MODELS_BY_PROVIDER.holo.i2i,
+    ...IMAGE_MODELS_BY_PROVIDER.flow2api.i2i,
+    ...IMAGE_MODELS_BY_PROVIDER.grok.i2i,
   ],
 };
+
+// 扁平 model→provider 索引：跟后端 model_registry.py 同步
+// 显式前缀（"flow2api/" 等）优先，其次走命名规则
+export function providerOf(model) {
+  if (!model) return 'holo';
+  const m = String(model).trim();
+  // 1. 显式前缀（最高优先，可消歧重名模型）
+  if (m.startsWith('flow2api/')) return 'flow2api';
+  if (m.startsWith('grok/')) return 'grok';
+  if (m.startsWith('holo/')) return 'holo';
+  // 2. 命名规则
+  if (m.startsWith('grok-')) return 'grok';
+  if (m.includes('_ultra')) return 'flow2api';
+  if (m.startsWith('GPT-Images') || m.startsWith('gemini-3.') || m.startsWith('imagen-') || m.startsWith('veo_3_')) return 'holo';
+  return 'holo';  // 兜底
+}
 
 // =====================================================
 // 默认模型（按 provider 选择）

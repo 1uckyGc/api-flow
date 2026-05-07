@@ -22,11 +22,18 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
     
     # AI APIs
+    # 老字段：作为 HOLO/FLOW2API 未填时的兜底（向后兼容）
     AI_API_URL: str = "http://localhost:8000"
     AI_API_KEY: str = ""
-    AI_PROVIDER: str = "flow2api"  # "flow2api" (SSE 流式) | "holo" (异步轮询)
-    AI_POLL_TIMEOUT: int = 600     # HOLO 轮询超时（秒）
-    AI_POLL_INTERVAL: float = 5.0  # HOLO 轮询间隔（秒）
+    AI_PROVIDER: str = "holo"  # 仅作为模型名命中不到任何 provider 规则时的兜底
+    AI_POLL_TIMEOUT: int = 600
+    AI_POLL_INTERVAL: float = 5.0
+
+    # 三套显式 provider 凭据（推荐使用，不再共用 AI_API_*）
+    HOLO_API_URL: str = ""
+    HOLO_API_KEY: str = ""
+    FLOW2API_URL: str = ""
+    FLOW2API_KEY: str = ""
 
     # Worker 推 WS 通知到 backend 的内部地址
     # Docker: http://backend:8000；本地: http://127.0.0.1:8000

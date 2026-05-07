@@ -1,9 +1,11 @@
 import React, { useEffect, useState } from 'react';
-import { X, Save } from 'lucide-react';
+import { X, Save, ScrollText } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import useSettingsStore from '../../stores/useSettingsStore';
 
 export default function SettingsModal() {
   const { isOpen, closeModal, settings, loading, fetchSettings, updateSettings } = useSettingsStore();
+  const navigate = useNavigate();
   const [formData, setFormData] = useState({});
   const [saving, setSaving] = useState(false);
 
@@ -138,6 +140,36 @@ export default function SettingsModal() {
                     </p>
                   </div>
                 </div>
+              </section>
+
+              {/* Section: Monitoring */}
+              <section className="rounded-xl p-5"
+                style={{ background: 'var(--surface-2)', border: '1px solid var(--border-subtle)' }}>
+                <h3 className="text-sm font-bold mb-4 pl-2"
+                  style={{ color: 'var(--text-primary)', borderLeft: '3px solid #f59e0b' }}>
+                  系统监控
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => { closeModal(); navigate('/logs'); }}
+                  className="w-full flex items-center justify-between rounded-lg px-4 py-3 transition-all text-sm font-semibold"
+                  style={{
+                    background: 'var(--surface-0)',
+                    border: '1px solid var(--border-default)',
+                    color: 'var(--text-primary)',
+                  }}
+                  onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--accent)'; }}
+                  onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border-default)'; }}
+                >
+                  <span className="flex items-center gap-2">
+                    <ScrollText size={16} style={{ color: 'var(--accent)' }} />
+                    调用日志与账单
+                  </span>
+                  <span style={{ color: 'var(--text-tertiary)' }}>→</span>
+                </button>
+                <p className="text-[10px] mt-2" style={{ color: 'var(--text-tertiary)' }}>
+                  查看本地调用审计、HOLO 余额与官方账单流水。
+                </p>
               </section>
 
               {/* Section: Storage */}

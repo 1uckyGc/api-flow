@@ -80,7 +80,7 @@ services:
       - "wsl.local:host-gateway"
     env_file: .env
     restart: unless-stopped
-    command: sh -c "celery -A app.workers.celery_app worker --loglevel=info -c ${MAX_CONCURRENT_TASKS:-4}"
+    command: sh -c "celery -A app.workers.celery_app worker --beat --loglevel=info -c ${MAX_CONCURRENT_TASKS:-4}"
 
   frontend:
     build:

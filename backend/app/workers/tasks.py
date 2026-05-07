@@ -13,6 +13,8 @@ from app.models.task import Task, TaskGroup, TaskStatus, GroupStatus
 from app.models.settings import SystemSettings
 from app.services.ai_service import ai_client
 from app.services.grok_client import grok_client
+from app.services.dispatcher import dispatch_generate
+from app.services.model_registry import resolve_provider
 
 import traceback
 from app.utils.logger import logger
@@ -256,81 +258,29 @@ async def execute_generation_task(task_id: str):
         allow_fallback = user_settings.allow_fallback_model if user_settings else True
         trim_frames = user_settings.trim_tail_frames if user_settings else 9
         
+        # 内部使用：所有 key 默认在 .env 配好，user_settings 里的 key 不再读取
         api_key = None
-        if user_settings:
-            if "veo" in model.lower():
-                api_key = user_settings.veo_api_key
-            elif "gemini" in model.lower():
-                api_key = user_settings.gemini_api_key
 
         if delay_ms > 0:
             logger.info(f"Task {task_id} waiting for {delay_ms}ms buffer based on settings")
             await asyncio.sleep(delay_ms / 1000.0)
 
-        # 调用 AI API
+        # 调用 AI API — 统一走 dispatch_generate（内部按模型名分发到 HOLO/Flow2API/Grok）
         logger.info(f"Task {task_id} starting AI generation with model {model}")
-        is_grok = model.startswith("grok-")
-        if is_grok:
-            # Grok 专属路径：走 grok_client，包一层强制重试
-            actual_retries = max_retries if max_retries > 0 else 3
-            last_err = ""
-            for attempt in range(actual_retries + 1):
-                if attempt > 0 and on_progress:
-                    await on_progress(f"[重试 {attempt}/{actual_retries}] 正在重新排队提交...")
-                    
-                input_files = task.input_files or []
-                
-                # --- 核心拦截：如果 Grok 做的是视频延展，说明 input_files[0] 是 mp4 ---
-                img_path_for_grok = input_files[0] if input_files else None
-                if group.config_json.get("isExtension") and img_path_for_grok and img_path_for_grok.endswith(".mp4"):
-                    if on_progress:
-                        await on_progress("正在提取视频尾帧作为环境参考...")
-                    last_frame_path = extract_last_video_frame(img_path_for_grok)
-                    if last_frame_path:
-                        img_path_for_grok = last_frame_path
-                
-                try:
-                    result = await grok_client.generate(
-                        model=model,
-                        prompt=prompt,
-                        config_json=group.config_json,
-                        input_image_path=img_path_for_grok,
-                        input_image_paths=[img_path_for_grok] if img_path_for_grok else None,
-                        api_key=api_key,
-                        progress_callback=on_progress,
-                    )
-                    
-                    if result.success:
-                        break
-                    else:
-                        last_err = str(result.error)
-                        logger.warning(f"Grok retry loop attempt {attempt+1} failed: {last_err}")
-                except Exception as e:
-                    last_err = str(e)
-                    logger.warning(f"Grok retry loop attempt {attempt+1} raised: {last_err}")
-
-                # 清理为了 grok 延展而生成的临时尾帧图
-                if group.config_json.get("isExtension") and img_path_for_grok and img_path_for_grok.endswith(".lastframe.jpg"):
-                    try:
-                        os.remove(img_path_for_grok)
-                    except Exception:
-                        pass
-                
-                if attempt < actual_retries:
-                    await asyncio.sleep(2 ** attempt)
-            
-            if not result or not result.success:
-                result.error = f"Max retries ({actual_retries}) reached. Last error: {last_err}"
-        else:
-            result = await ai_client.generate_with_retry(
-                model=model,
-                prompt=prompt,
-                image_paths=task.input_files if task.input_files else None,
-                max_retries=max_retries,
-                progress_callback=on_progress,
-                api_key=api_key,
-                allow_fallback=allow_fallback
-            )
+        is_grok = resolve_provider(model) == "grok"
+        result = await dispatch_generate(
+            model=model,
+            prompt=prompt,
+            image_paths=task.input_files if task.input_files else None,
+            config_json=group.config_json,
+            api_key=api_key,
+            max_retries=max_retries,
+            progress_callback=on_progress,
+            allow_fallback=allow_fallback,
+            user_id=user_id,
+            task_id=task_id,
+            group_id=task.group_id,
+        )
 
         if result.success and result.data:
             # 保存文件

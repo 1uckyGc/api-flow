@@ -384,8 +384,13 @@ export default function ToolPanel() {
                 if (path.includes('t2i') || path.includes('i2i')) {
                   return (
                     <>
+                      <option disabled>──── HOLO ────</option>
                       <option value="gemini-3.1-flash-image">Gemini 3.1 Flash — 迅速生图</option>
                       <option value="gemini-3.0-pro-image">Gemini 3.0 Pro — 高质量生图</option>
+                      <option disabled>──── Flow2API ────</option>
+                      <option value="flow2api/gemini-3.1-flash-image-portrait">
+                        Flow2API · Gemini 3.1 Flash 竖屏{path.includes('i2i') ? ' (R2I)' : ''}
+                      </option>
                       <option disabled>──── Grok ────</option>
                       {path.includes('i2i') ? (
                         <option value="grok-imagine-image-edit">Grok Imagine Edit — 图像编辑 (Super+)</option>
@@ -399,25 +404,22 @@ export default function ToolPanel() {
                   );
                 }
                 const kind = path.includes('i2v') ? 'i2v' : 't2v';
-                if (isHolo) {
-                  const orient = aspectToOrientation(aspectRatio);
-                  return (
-                    <>
-                      {VIDEO_MODELS.holo[kind][orient].map(o => (
-                        <option key={o.value} value={o.value}>{o.label}</option>
-                      ))}
-                      <option disabled>──── Grok ────</option>
-                      <option value={path.includes('i2v') ? 'grok-imagine-video-i2v' : 'grok-imagine-video-t2v'}>
-                        Grok Imagine Video (Super+)
-                      </option>
-                    </>
-                  );
-                }
-                // flow2api
+                const orient = aspectToOrientation(aspectRatio);
                 return (
                   <>
+                    <option disabled>──── HOLO ────</option>
+                    {VIDEO_MODELS.holo[kind][orient].map(o => (
+                      <option key={`holo-${o.value}`} value={o.value}>{o.label}</option>
+                    ))}
+                    <option disabled>──── Flow2API ────</option>
+                    {kind === 'i2v' && (
+                      <>
+                        <option value="flow2api/veo_3_1_i2v_s_fast_portrait_ultra_fl">Flow2API · I2V Fast 竖屏</option>
+                        <option value="flow2api/veo_3_1_r2v_fast_portrait">Flow2API · R2V 竖屏 (多图参考)</option>
+                      </>
+                    )}
                     {VIDEO_MODELS.flow2api[kind].portrait.map(o => (
-                      <option key={o.value} value={o.value}>{o.label}</option>
+                      <option key={`flow-${o.value}`} value={o.value}>{o.label}</option>
                     ))}
                     {kind === 't2v' && <option value="veo_t2v_lite">VEO 3.1 T2V Lite</option>}
                     {kind === 'i2v' && <option value="veo_i2v_lite">VEO 3.1 I2V Lite — 首帧</option>}

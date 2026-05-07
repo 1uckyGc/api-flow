@@ -27,6 +27,11 @@ venv/
 env/
 ENV/
 
+# Celery 运行时状态（beat 调度持久化）
+celerybeat-schedule
+celerybeat-schedule.*
+backend/celerybeat-schedule
+
 # ─── Node / 前端 ───────────────────────────────────────────────────────
 node_modules/
 frontend/dist/

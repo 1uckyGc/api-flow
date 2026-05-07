@@ -97,9 +97,23 @@ def extract_last_frame_base64_sync(video_path: str) -> str:
         logger.error(f"Failed to extract last frame from {video_path}: {e}")
         raise ValueError(f"无法提取视频尾帧: {e}")
 
+def _holo_url() -> str:
+    return (settings.HOLO_API_URL or settings.AI_API_URL or "").rstrip("/")
+
+def _holo_key() -> str:
+    return settings.HOLO_API_KEY or settings.AI_API_KEY or ""
+
+def _flow2api_url() -> str:
+    return (settings.FLOW2API_URL or settings.AI_API_URL or "").rstrip("/")
+
+def _flow2api_key() -> str:
+    return settings.FLOW2API_KEY or settings.AI_API_KEY or ""
+
+
 class AIClient:
     def __init__(self):
-        self.base_url = settings.AI_API_URL.rstrip("/")
+        # 不再缓存单一 base_url/api_key — 每次 _generate_* 按 provider 现取。
+        # 老 self.api_key 留兼容（未传 api_key 时 _generate_holo/_flow2api 用各自 helper）。
         self.api_key = settings.AI_API_KEY
         self._http_pool: httpx.AsyncClient | None = None
         self._http_pool_loop_id: int | None = None
@@ -220,21 +234,29 @@ class AIClient:
         return res
 
     async def generate(self, model: str, prompt: str, image_paths: list[str] | None = None, progress_callback: Callable[[str], None] = None, api_key: str = None) -> GenerationResult:
-        """统一入口；按 settings.AI_PROVIDER 分发到 flow2api 或 holo。"""
+        """统一入口；按模型名解析 provider，分发到 _generate_holo / _generate_flow2api。
+        Grok 走外层 dispatcher（grok_client 需要 config_json，本类不持有），不在此处理。
+        """
         from app.utils.scheduler import wait_for_api_slot
+        from app.services.model_registry import resolve_provider
+
         await wait_for_api_slot(api_type="gemini_veo")
 
-        provider = (getattr(settings, "AI_PROVIDER", "flow2api") or "flow2api").lower()
-        if provider == "holo":
-            return await self._generate_holo(model, prompt, image_paths, progress_callback, api_key)
-        return await self._generate_flow2api(model, prompt, image_paths, progress_callback, api_key)
+        provider = resolve_provider(model, getattr(settings, "AI_PROVIDER", "holo") or "holo")
+        if provider == "flow2api":
+            return await self._generate_flow2api(model, prompt, image_paths, progress_callback, api_key)
+        # 默认/holo：未注册模型也走这条
+        return await self._generate_holo(model, prompt, image_paths, progress_callback, api_key)
 
     async def _generate_holo(self, model: str, prompt: str, image_paths: list[str] | None = None, progress_callback: Callable[[str], None] = None, api_key: str = None) -> GenerationResult:
         """HOLO API: 提交 → 轮询 → 下载。"""
+        from app.services.model_registry import strip_provider_prefix
         result = GenerationResult()
+        model = strip_provider_prefix(model)
         model = normalize_holo_model(model)
         is_video = any(k in model.lower() for k in ["veo", "t2v", "i2v", "r2v"])
-        active_key = api_key if api_key else self.api_key
+        base_url = _holo_url()
+        active_key = api_key if api_key else _holo_key()
         headers = {
             "Authorization": f"Bearer {active_key}",
             "Content-Type": "application/json",
@@ -250,7 +272,7 @@ class AIClient:
                 await progress_callback("正在提交生成任务...")
             try:
                 submit_resp = await client.post(
-                    f"{self.base_url}/v1/generate",
+                    f"{base_url}/v1/generate",
                     json=payload, headers=headers, timeout=60.0,
                 )
             except (httpx.ReadError, httpx.ConnectError, httpx.RemoteProtocolError) as e:
@@ -273,6 +295,10 @@ class AIClient:
                 result.error = f"Submit 未返回 task_id: {submit_data}"
                 return result
 
+            # 给 dispatcher 用于 ApiCallLog 回填
+            result._holo_task_id = task_id
+            result._cost = submit_data.get("cost")
+
             queue_pos = submit_data.get("position")
             if progress_callback:
                 if queue_pos is not None:
@@ -281,7 +307,7 @@ class AIClient:
                     await progress_callback("已提交，等待处理...")
 
             # --- 2. POLL ---
-            poll_url = f"{self.base_url}/v1/tasks/{task_id}"
+            poll_url = f"{base_url}/v1/tasks/{task_id}"
             poll_interval = float(getattr(settings, "AI_POLL_INTERVAL", 5.0))
             max_wait = float(getattr(settings, "AI_POLL_TIMEOUT", 600))
             elapsed = 0.0
@@ -324,12 +350,18 @@ class AIClient:
                     res_obj = body.get("result") or {}
                     file_url = res_obj.get("file_url")
                     file_ext_hint = res_obj.get("file_ext")
+                    # 回填 cost / task_type（如响应里有）给 dispatcher 写日志用
+                    if body.get("cost") is not None:
+                        result._cost = body.get("cost")
+                    if res_obj.get("type"):
+                        result._task_type = res_obj.get("type")
                     break
                 if status in ("failed", "cancelled"):
                     err = body.get("error") or status
                     result.error = f"Task {status}: {err}"
                     # HOLO 已自动退款，标记终态避免上层重试烧配额
                     result._terminal = True
+                    result._refunded = bool(body.get("refunded", True))
                     return result
                 # else queued/processing → 继续轮询
             else:
@@ -343,7 +375,7 @@ class AIClient:
             # --- 3. DOWNLOAD ---
             if progress_callback:
                 await progress_callback("正在下载结果...")
-            full_url = file_url if file_url.startswith("http") else f"{self.base_url}{file_url}"
+            full_url = file_url if file_url.startswith("http") else f"{base_url}{file_url}"
             for dl_attempt in range(3):
                 try:
                     dl = await client.get(
@@ -382,13 +414,16 @@ class AIClient:
 
     async def _generate_flow2api(self, model: str, prompt: str, image_paths: list[str] | None = None, progress_callback: Callable[[str], None] = None, api_key: str = None) -> GenerationResult:
         """Flow2API: OpenAI 兼容流式 SSE。"""
-        url = f"{self.base_url}/v1/chat/completions"
+        from app.services.model_registry import strip_provider_prefix
+        model = strip_provider_prefix(model)
+        base_url = _flow2api_url()
+        url = f"{base_url}/v1/chat/completions"
         messages = await self._build_messages(prompt, image_paths)
         payload = {"model": model, "messages": messages, "stream": True}
         result = GenerationResult()
         is_video = any(k in model.lower() for k in ["veo", "t2v", "i2v", "r2v"])
 
-        active_key = api_key if api_key else self.api_key
+        active_key = api_key if api_key else _flow2api_key()
         headers = {
             "Authorization": f"Bearer {active_key}",
             "Content-Type": "application/json",

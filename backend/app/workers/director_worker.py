@@ -8,6 +8,7 @@ from app.database import SessionLocal
 from app.models.task import Task, TaskGroup, TaskStatus, GroupStatus
 from app.models.settings import SystemSettings
 from app.services.ai_service import ai_client, generate_director_scene_prompts
+from app.services.dispatcher import dispatch_generate
 from app.workers.celery_app import celery_app
 from app.workers.tasks import notify_ws, update_group_status
 from app.utils.logger import logger
@@ -150,12 +151,16 @@ async def execute_director_session(group_id: str, payload: dict, user_id: int):
             anchor_task.input_files = product_files if product_files else []
             db.commit()
 
-            anchor_result = await ai_client.generate_with_retry(
+            anchor_result = await dispatch_generate(
                 model=model,
                 prompt=anchor_task.prompt,
                 image_paths=anchor_task.input_files or None,
-                max_retries=3,
+                config_json=group.config_json,
                 api_key=api_key,
+                max_retries=3,
+                user_id=user_id,
+                task_id=anchor_task.id,
+                group_id=group_id,
             )
 
             db.refresh(anchor_task)
@@ -206,12 +211,16 @@ async def execute_director_session(group_id: str, payload: dict, user_id: int):
                 frame_task.input_files = ref_images
                 frame_db.commit()
 
-                result = await ai_client.generate_with_retry(
+                result = await dispatch_generate(
                     model=model,
                     prompt=frame_task.prompt,
                     image_paths=frame_task.input_files or None,
-                    max_retries=3,
+                    config_json=group.config_json,
                     api_key=api_key,
+                    max_retries=3,
+                    user_id=user_id,
+                    task_id=frame_task.id,
+                    group_id=group_id,
                 )
 
                 frame_db.refresh(frame_task)

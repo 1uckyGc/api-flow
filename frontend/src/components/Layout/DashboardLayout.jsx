@@ -9,6 +9,7 @@ import DirectorPage from '../../pages/director/DirectorPage';
 import WorkshopPage from '../../pages/workshop/WorkshopPage';
 import WorkflowBuilder from '../../pages/workshop/WorkflowBuilder';
 import WorkflowRunner from '../../pages/workshop/WorkflowRunner';
+import Logs from '../../pages/Logs';
 
 const FISSION_PATHS = ['/fission'];
 
@@ -19,8 +20,10 @@ export default function DashboardLayout() {
   const isWorkshopIndex = pathname === '/workshop';
   const isWorkshopBuild = pathname.startsWith('/workshop/build');
   const isWorkshopRun = pathname.startsWith('/workshop/run');
+  const isLogsPage = pathname.startsWith('/logs');
 
   const renderContent = () => {
+    if (isLogsPage) return <Logs />;
     if (isFissionMode) return <FissionWorkspace />;
     if (isDirectorMode) return <DirectorPage />;
     if (isWorkshopIndex) return <WorkshopPage />;

@@ -48,7 +48,15 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
         data={"sub": user.username, "id": user.id}, expires_delta=access_token_expires
     )
     
-    return {"access_token": access_token, "token_type": "bearer", "user": user}
+    user_payload = {
+        "id": user.id,
+        "username": user.username,
+        "display_name": user.display_name,
+        "is_active": user.is_active,
+        "created_at": user.created_at,
+        "is_admin": user.username == "admin",
+    }
+    return {"access_token": access_token, "token_type": "bearer", "user": user_payload}
 
 from jose import jwt, JWTError
 
@@ -73,4 +81,11 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
 
 @router.get("/me", response_model=UserResponse)
 def read_users_me(current_user: User = Depends(get_current_user)):
-    return current_user
+    return {
+        "id": current_user.id,
+        "username": current_user.username,
+        "display_name": current_user.display_name,
+        "is_active": current_user.is_active,
+        "created_at": current_user.created_at,
+        "is_admin": current_user.username == "admin",
+    }

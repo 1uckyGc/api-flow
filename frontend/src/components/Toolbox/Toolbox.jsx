@@ -5,8 +5,11 @@ import api from '../../api/client';
 import useTaskStore from '../../stores/useTaskStore';
 import { useProvider } from '../../hooks/useProvider';
 import {
-  VIDEO_MODELS, IMAGE_MODELS, getDefaultModel, mapModelForFlow2API, aspectToOrientation,
+  VIDEO_MODELS, IMAGE_MODELS, IMAGE_MODELS_BY_PROVIDER, getImageModelsByProvider,
+  getDefaultModel, mapModelForFlow2API, aspectToOrientation, providerOf,
 } from '../../constants/models';
+
+const PROVIDER_LABEL = { holo: 'HOLO', flow2api: 'Flow2API', grok: 'Grok' };
 
 export default function Toolbox() {
   const location = useLocation();
@@ -373,33 +376,58 @@ export default function Toolbox() {
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               <div>
                 <label className="block text-[11px] mb-1.5" style={{ color: 'var(--text-tertiary)' }}>模型</label>
-                <select 
-                  value={model} 
+                <select
+                  value={model}
                   onChange={(e) => setModel(e.target.value)}
                   className={selectClass}
                   style={selectStyle}
                 >
                   {(() => {
+                    // 三 provider 同时存在；按 provider 分组渲染 optgroup
                     if (path.includes('t2i') || path.includes('i2i')) {
-                      return (
-                        <>
-                          <option value="gemini-3.1-flash-image">Gemini 3.1 Flash</option>
-                          <option value="gemini-3.0-pro-image">Gemini 3.0 Pro</option>
-                        </>
-                      );
+                      const kind = path.includes('i2i') ? 'i2i' : 't2i';
+                      const groups = [];
+                      for (const p of ['holo', 'grok', 'flow2api']) {
+                        const opts = getImageModelsByProvider(p, kind);
+                        if (opts.length === 0) continue;
+                        groups.push(
+                          <optgroup key={p} label={PROVIDER_LABEL[p]}>
+                            {opts.map(o => <option key={`${p}-${o.value}`} value={o.value}>{o.label}</option>)}
+                          </optgroup>
+                        );
+                      }
+                      return groups;
                     }
                     const kind = path.includes('i2v') ? 'i2v' : 't2v';
-                    if (isHolo) {
-                      const orient = aspectToOrientation(aspectRatio);
-                      return VIDEO_MODELS.holo[kind][orient].map(o => (
-                        <option key={o.value} value={o.value}>{o.label}</option>
-                      ));
-                    }
-                    return VIDEO_MODELS.flow2api[kind].portrait.map(o => (
-                      <option key={o.value} value={o.value}>{o.label}</option>
-                    ));
+                    const orient = aspectToOrientation(aspectRatio);
+                    const groups = [];
+                    // HOLO 按 orientation 取
+                    const holoOpts = VIDEO_MODELS.holo?.[kind]?.[orient] || [];
+                    if (holoOpts.length) groups.push(
+                      <optgroup key="holo" label={PROVIDER_LABEL.holo}>
+                        {holoOpts.map(o => <option key={`holo-${o.value}`} value={o.value}>{o.label}</option>)}
+                      </optgroup>
+                    );
+                    // Flow2API 老 portrait 行（旧别名内部映射时考虑横竖屏）
+                    const flowOpts = VIDEO_MODELS.flow2api?.[kind]?.portrait || [];
+                    if (flowOpts.length) groups.push(
+                      <optgroup key="flow2api" label={PROVIDER_LABEL.flow2api}>
+                        {flowOpts.map(o => <option key={`flow-${o.value}`} value={o.value}>{o.label}</option>)}
+                      </optgroup>
+                    );
+                    // Grok 不区分方向（grok_client 内部按 aspect_ratio 算 size）
+                    const grokOpts = VIDEO_MODELS.grok?.[kind]?.[orient] || VIDEO_MODELS.grok?.[kind]?.portrait || [];
+                    if (grokOpts.length) groups.push(
+                      <optgroup key="grok" label={PROVIDER_LABEL.grok}>
+                        {grokOpts.map(o => <option key={`grok-${o.value}`} value={o.value}>{o.label}</option>)}
+                      </optgroup>
+                    );
+                    return groups;
                   })()}
                 </select>
+                <p className="text-[10px] mt-1" style={{ color: 'var(--text-tertiary)' }}>
+                  本次调用走 <span style={{ color: 'var(--accent)' }}>{PROVIDER_LABEL[providerOf(model)] || providerOf(model)}</span>
+                </p>
               </div>
               <div>
                 <label className="block text-[11px] mb-1.5" style={{ color: 'var(--text-tertiary)' }}>画面比例</label>

@@ -1,4 +1,5 @@
 from celery import Celery
+from celery.schedules import crontab
 from app.config import settings
 import os
 
@@ -10,7 +11,12 @@ celery_app = Celery(
     "followmeeeaigc",
     broker=settings.CELERY_BROKER_URL,
     backend=settings.CELERY_RESULT_BACKEND,
-    include=["app.workers.tasks", "app.workers.director_worker", "app.workers.workflow_worker"]
+    include=[
+        "app.workers.tasks",
+        "app.workers.director_worker",
+        "app.workers.workflow_worker",
+        "app.workers.cleanup_tasks",
+    ],
 )
 
 celery_app.conf.update(
@@ -21,4 +27,10 @@ celery_app.conf.update(
     enable_utc=True,
     task_track_started=True,
     task_always_eager=settings.CELERY_TASK_ALWAYS_EAGER,
+    beat_schedule={
+        "purge-old-api-call-logs": {
+            "task": "app.workers.cleanup_tasks.purge_old_logs",
+            "schedule": crontab(hour=3, minute=30),  # 每天凌晨 03:30
+        },
+    },
 )

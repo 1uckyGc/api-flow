@@ -13,7 +13,8 @@ class UserResponse(UserBase):
     id: int
     is_active: bool
     created_at: datetime
-    
+    is_admin: bool = False
+
     model_config = ConfigDict(from_attributes=True)
 
 class Token(BaseModel):
