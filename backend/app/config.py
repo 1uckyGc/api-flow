@@ -20,6 +20,14 @@ class Settings(BaseSettings):
     SECRET_KEY: str = ""
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
+
+    # 集中身份：把 api-flow 登录代理到 followmeee.co/api/login
+    FOLLOWMEEE_AUTH_URL: str = "https://followmeee.co"
+
+    # 离线 admin 兜底（followmeee.co 不可达时仍可登）
+    # EMERGENCY_ADMIN_PASSWORD_HASH 留空 → 兜底通道关闭
+    EMERGENCY_ADMIN_USERNAME: str = "admin"
+    EMERGENCY_ADMIN_PASSWORD_HASH: str = ""
     
     # AI APIs
     # 老字段：作为 HOLO/FLOW2API 未填时的兜底（向后兼容）
