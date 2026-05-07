@@ -121,7 +121,11 @@ def list_logs(
 
 @router.get("/balance")
 async def holo_balance(current_user: User = Depends(get_current_user)):
-    """代理 HOLO GET /me — 当前 key 的余额、今日扣费、阶梯定价等。"""
+    """代理 HOLO GET /me — 当前 key 的余额、今日扣费、阶梯定价等。
+    仅管理员可看；普通用户共享同一把 HOLO key，不应暴露账户级账单数据。
+    """
+    if not _is_admin(current_user):
+        raise HTTPException(403, "仅管理员可查看 HOLO 账户余额")
     base = _holo_base()
     if not base:
         raise HTTPException(503, "HOLO 未配置")
@@ -146,7 +150,11 @@ async def holo_transactions(
     offset: int = Query(0, ge=0),
     current_user: User = Depends(get_current_user),
 ):
-    """代理 HOLO GET /me/transactions —— 官方账单流水。"""
+    """代理 HOLO GET /me/transactions —— 账户级官方账单流水。
+    仅管理员可看，普通用户对应行只能看本地 ApiCallLog。
+    """
+    if not _is_admin(current_user):
+        raise HTTPException(403, "仅管理员可查看 HOLO 账户账单")
     base = _holo_base()
     if not base:
         raise HTTPException(503, "HOLO 未配置")

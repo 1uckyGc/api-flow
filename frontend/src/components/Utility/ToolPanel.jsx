@@ -5,8 +5,11 @@ import api from '../../api/client';
 import useTaskStore from '../../stores/useTaskStore';
 import { useProvider } from '../../hooks/useProvider';
 import {
-  VIDEO_MODELS, getDefaultModel, mapModelForFlow2API, aspectToOrientation,
+  VIDEO_MODELS, getDefaultModel, mapModelForFlow2API, aspectToOrientation, providerOf,
 } from '../../constants/models';
+
+// 模型 value 是否已带方向后缀（避免再次追加 -portrait / -landscape）
+const ORIENT_SUFFIX_RE = /-(portrait|landscape|square|four-three|three-four)(-2k|-4k)?$/;
 
 export default function ToolPanel() {
   const location = useLocation();
@@ -148,23 +151,27 @@ export default function ToolPanel() {
 
     const ratioSuffix = aspectRatio === '16:9' ? 'landscape' : 'portrait';
     let finalModel = model;
+
+    // 按"模型自身的 provider"分发（不再依赖全局 isHolo），三 provider 并存安全
+    const modelProvider = providerOf(model);
+
     if (model.startsWith('grok-')) {
+      // Grok：t2v/i2v 别名 → 真名 grok-imagine-video
       finalModel = (model === 'grok-imagine-video-t2v' || model === 'grok-imagine-video-i2v')
         ? 'grok-imagine-video' : model;
-    } else if (model.includes('gemini')) {
-      let ratioSuffix2 = '-portrait';
-      if (aspectRatio === '16:9') ratioSuffix2 = '-landscape';
-      if (aspectRatio === '1:1') ratioSuffix2 = '-square';
-      finalModel = model + ratioSuffix2;
-      if (resolution === '2k') finalModel += '-2k';
-      if (resolution === '4k') finalModel += '-4k';
-    } else if (isHolo) {
-      // HOLO 视频：dropdown value 是实名；r2v 模式换前缀
-      if (path.includes('i2v') && i2vMode === 'r2v') {
-        finalModel = model
-          .replace('_i2v_s_', '_r2v_fast_')
-          .replace('_i2v_fast_', '_r2v_fast_')
-          .replace('_i2v_lite_', '_r2v_lite_');
+    } else if (model.startsWith('flow2api/')) {
+      // 显式 flow2api/ 前缀的模型 value 已是 API 实名（含方向后缀），后端 dispatcher 会 strip 前缀
+      finalModel = model;
+    } else if (modelProvider === 'flow2api') {
+      // Flow2API 老短别名（_ultra / _ultra_relaxed / _ultra_fl 等）— 不论全局 provider 都要走映射
+      if ((path.includes('i2v') && i2vMode === 'r2v') &&
+          (model === 'veo_i2v_ultra' || model === 'veo_i2v_ultra_relaxed')) {
+        const isLandscape = aspectRatio === '16:9';
+        finalModel = model === 'veo_i2v_ultra'
+          ? (isLandscape ? 'veo_3_1_r2v_fast_ultra'         : 'veo_3_1_r2v_fast_portrait_ultra')
+          : (isLandscape ? 'veo_3_1_r2v_fast_ultra_relaxed' : 'veo_3_1_r2v_fast_portrait_ultra_relaxed');
+      } else {
+        finalModel = mapModelForFlow2API(model, aspectRatio);
       }
     } else if (model === 'veo_t2v_lite') {
       finalModel = `veo_3_1_t2v_lite_${ratioSuffix}`;
@@ -172,14 +179,23 @@ export default function ToolPanel() {
       finalModel = `veo_3_1_i2v_lite_${ratioSuffix}`;
     } else if (model === 'veo_interpolation_lite') {
       finalModel = `veo_3_1_interpolation_lite_${ratioSuffix}`;
-    } else if ((path.includes('i2v') && i2vMode === 'r2v') &&
-               (model === 'veo_i2v_ultra' || model === 'veo_i2v_ultra_relaxed')) {
-      const isLandscape = aspectRatio === '16:9';
-      finalModel = model === 'veo_i2v_ultra'
-        ? (isLandscape ? 'veo_3_1_r2v_fast_ultra'         : 'veo_3_1_r2v_fast_portrait_ultra')
-        : (isLandscape ? 'veo_3_1_r2v_fast_ultra_relaxed' : 'veo_3_1_r2v_fast_portrait_ultra_relaxed');
+    } else if (model.includes('gemini') && !ORIENT_SUFFIX_RE.test(model)) {
+      // Gemini 短别名（gemini-3.1-flash-image / gemini-3.0-pro-image）拼方向后缀
+      // 已含 -portrait/-landscape/-square 等的 value 跳过（防止 -portrait-portrait）
+      let ratioSuffix2 = '-portrait';
+      if (aspectRatio === '16:9') ratioSuffix2 = '-landscape';
+      if (aspectRatio === '1:1') ratioSuffix2 = '-square';
+      finalModel = model + ratioSuffix2;
+      if (resolution === '2k') finalModel += '-2k';
+      if (resolution === '4k') finalModel += '-4k';
     } else {
-      finalModel = mapModelForFlow2API(model, aspectRatio);
+      // HOLO 视频：dropdown value 已是实名；r2v 模式换前缀
+      if (path.includes('i2v') && i2vMode === 'r2v') {
+        finalModel = model
+          .replace('_i2v_s_', '_r2v_fast_')
+          .replace('_i2v_fast_', '_r2v_fast_')
+          .replace('_i2v_lite_', '_r2v_lite_');
+      }
     }
 
     const expandedTasks = [];

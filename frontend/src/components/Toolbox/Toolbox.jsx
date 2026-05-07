@@ -139,28 +139,18 @@ export default function Toolbox() {
         return;
       }
 
-    // 拼最终提交模型名
+    // 拼最终提交模型名 — 按"模型自身的 provider"分发，不依赖全局 isHolo
     let finalModel = model;
+    const modelProvider = providerOf(model);
+    const ORIENT_SUFFIX_RE = /-(portrait|landscape|square|four-three|three-four)(-2k|-4k)?$/;
 
-    if (model.includes('gemini')) {
-      // 图像：短别名 + ratio 后缀（HOLO 与 flow2api 都吃这种命名）
-      let ratioSuffix = '-portrait';
-      if (aspectRatio === '16:9') ratioSuffix = '-landscape';
-      if (aspectRatio === '1:1') ratioSuffix = '-square';
-      finalModel = model + ratioSuffix;
-      if (resolution === '2k') finalModel += '-2k';
-      if (resolution === '4k') finalModel += '-4k';
-    } else if (isHolo) {
-      // HOLO 视频：dropdown value 已经是 API 实名，r2v 模式需要换前缀
-      if (path.includes('i2v') && i2vMode === 'r2v') {
-        // 把 i2v_lite_/i2v_fast_/i2v_s_ 替换为 r2v_lite_/r2v_fast_（HOLO r2v 没 quality）
-        finalModel = model
-          .replace('_i2v_s_', '_r2v_fast_')
-          .replace('_i2v_fast_', '_r2v_fast_')
-          .replace('_i2v_lite_', '_r2v_lite_');
-      }
-    } else {
-      // flow2api 老短别名 → API 实名
+    if (model.startsWith('grok-')) {
+      finalModel = model;
+    } else if (model.startsWith('flow2api/')) {
+      // 显式前缀模型 value 已是 API 实名（含方向后缀），后端 dispatcher 会 strip 前缀
+      finalModel = model;
+    } else if (modelProvider === 'flow2api') {
+      // Flow2API 老短别名 — 不论全局 provider 都要走映射
       if ((path.includes('i2v') && i2vMode === 'r2v') &&
           (model === 'veo_i2v_ultra' || model === 'veo_i2v_ultra_relaxed')) {
         const isLandscape = aspectRatio === '16:9';
@@ -169,6 +159,22 @@ export default function Toolbox() {
           : (isLandscape ? 'veo_3_1_r2v_fast_ultra_relaxed' : 'veo_3_1_r2v_fast_portrait_ultra_relaxed');
       } else {
         finalModel = mapModelForFlow2API(model, aspectRatio);
+      }
+    } else if (model.includes('gemini') && !ORIENT_SUFFIX_RE.test(model)) {
+      // Gemini 短别名拼方向后缀；已含方向后缀的 value 跳过（防 -portrait-portrait）
+      let ratioSuffix = '-portrait';
+      if (aspectRatio === '16:9') ratioSuffix = '-landscape';
+      if (aspectRatio === '1:1') ratioSuffix = '-square';
+      finalModel = model + ratioSuffix;
+      if (resolution === '2k') finalModel += '-2k';
+      if (resolution === '4k') finalModel += '-4k';
+    } else {
+      // HOLO 视频 dropdown value 已是 API 实名，r2v 模式换前缀
+      if (path.includes('i2v') && i2vMode === 'r2v') {
+        finalModel = model
+          .replace('_i2v_s_', '_r2v_fast_')
+          .replace('_i2v_fast_', '_r2v_fast_')
+          .replace('_i2v_lite_', '_r2v_lite_');
       }
     }
 

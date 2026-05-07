@@ -63,8 +63,9 @@ export default function Logs() {
   const [balance, setBalance] = useState(null);
   const [balanceErr, setBalanceErr] = useState(null);
 
-  // ── 余额轮询 ──
+  // ── 余额轮询（仅 admin）——
   const loadBalance = useCallback(async () => {
+    if (!isAdmin) return;
     try {
       const data = await fetchHoloBalance();
       setBalance(data);
@@ -72,12 +73,13 @@ export default function Logs() {
     } catch (e) {
       setBalanceErr(e?.response?.data?.detail || e.message || '加载失败');
     }
-  }, []);
+  }, [isAdmin]);
   useEffect(() => {
+    if (!isAdmin) return;
     loadBalance();
     const t = setInterval(loadBalance, 30000);
     return () => clearInterval(t);
-  }, [loadBalance]);
+  }, [loadBalance, isAdmin]);
 
   return (
     <div style={{ padding: 24, minHeight: '100vh', background: 'var(--surface-1)' }}>
@@ -102,17 +104,22 @@ export default function Logs() {
         </button>
       </div>
 
-      {/* KPI */}
-      <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
-        <Kpi label="HOLO 余额" value={balance?.credits ?? '—'} hint={balanceErr ? `⚠ ${balanceErr}` : null} />
-        <Kpi label="冻结积分" value={balance?.frozen_credits ?? '—'} />
-        <Kpi label="今日已扣" value={balance?.daily_credits_used ?? '—'} hint={`${balance?.daily_used ?? 0} 次请求`} />
-        <Kpi label="今日生成" value={`${balance?.today_img ?? 0} 图 / ${balance?.today_vid ?? 0} 视`} />
-      </div>
+      {/* KPI（仅管理员可见，HOLO 余额是账户级共享数据）*/}
+      {isAdmin && (
+        <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
+          <Kpi label="HOLO 余额" value={balance?.credits ?? '—'} hint={balanceErr ? `⚠ ${balanceErr}` : null} />
+          <Kpi label="冻结积分" value={balance?.frozen_credits ?? '—'} />
+          <Kpi label="今日已扣" value={balance?.daily_credits_used ?? '—'} hint={`${balance?.daily_used ?? 0} 次请求`} />
+          <Kpi label="今日生成" value={`${balance?.today_img ?? 0} 图 / ${balance?.today_vid ?? 0} 视`} />
+        </div>
+      )}
 
-      {/* Tabs */}
+      {/* Tabs：HOLO 官方账单仅管理员可见 */}
       <div style={{ display: 'flex', gap: 8, marginBottom: 16, borderBottom: '1px solid var(--border-subtle)' }}>
-        {[{k:'local', label:'本地调用日志'}, {k:'holo', label:'HOLO 官方账单'}].map(t => (
+        {[
+          { k: 'local', label: '本地调用日志' },
+          ...(isAdmin ? [{ k: 'holo', label: 'HOLO 官方账单' }] : []),
+        ].map(t => (
           <button key={t.k}
             onClick={() => setTab(t.k)}
             style={{
@@ -128,9 +135,9 @@ export default function Logs() {
         ))}
       </div>
 
-      {tab === 'local'
-        ? <LocalLogs isAdmin={isAdmin} />
-        : <HoloTransactions />}
+      {tab === 'holo' && isAdmin
+        ? <HoloTransactions />
+        : <LocalLogs isAdmin={isAdmin} />}
     </div>
   );
 }
