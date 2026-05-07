@@ -1,6 +1,8 @@
 import React from 'react';
 import useWorkshopStore from '../../../stores/useWorkshopStore';
 import { Settings2, Type, Box, SlidersHorizontal, Image as ImageIcon } from 'lucide-react';
+import { useProvider } from '../../../hooks/useProvider';
+import { VIDEO_MODELS } from '../../../constants/models';
 
 const NODE_TYPES_I18N = {
   't2i': '文本生图 (T2I)',
@@ -14,6 +16,8 @@ const NODE_TYPES_I18N = {
 };
 
 export default function ConfigPanel() {
+  const provider = useProvider();
+  const isHolo = provider === 'holo';
   const selectedNode = useWorkshopStore(s => s.getSelectedNode());
   const updateNodeConfig = useWorkshopStore(s => s.updateNodeConfig);
   const updateNodeLabel = useWorkshopStore(s => s.updateNodeLabel);
@@ -100,7 +104,26 @@ export default function ConfigPanel() {
                     </optgroup>
                   </>
                 )}
-                {type === 't2v' && (
+                {(type === 't2v' || type === 'i2v') && isHolo && (
+                  <>
+                    <optgroup label="HOLO 竖屏">
+                      {VIDEO_MODELS.holo[type].portrait.map(o => (
+                        <option key={o.value} value={o.value}>{o.label}</option>
+                      ))}
+                    </optgroup>
+                    <optgroup label="HOLO 横屏">
+                      {VIDEO_MODELS.holo[type].landscape.map(o => (
+                        <option key={o.value} value={o.value}>{o.label}</option>
+                      ))}
+                    </optgroup>
+                    <optgroup label="Grok">
+                      <option value={type === 't2v' ? 'grok-imagine-video-t2v' : 'grok-imagine-video-i2v'}>
+                        Grok Imagine Video
+                      </option>
+                    </optgroup>
+                  </>
+                )}
+                {type === 't2v' && !isHolo && (
                   <>
                     <optgroup label="VEO 3.1">
                       <option value="veo_t2v_ultra">Veo T2V Ultra (极速模式)</option>
@@ -112,7 +135,7 @@ export default function ConfigPanel() {
                     </optgroup>
                   </>
                 )}
-                {type === 'i2v' && (
+                {type === 'i2v' && !isHolo && (
                   <>
                     <optgroup label="VEO 3.1">
                       <option value="veo_i2v_ultra">Veo I2V Ultra (首尾帧 - 极速)</option>

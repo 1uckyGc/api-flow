@@ -6,12 +6,15 @@ import {
 } from 'lucide-react';
 import useTaskStore from '../../stores/useTaskStore';
 import api from '../../api/client';
+import { useProvider } from '../../hooks/useProvider';
+import { getDefaultModel } from '../../constants/models';
 
 /**
  * 无尽画廊 —— 按时间倒序平铺展示当前模式下所有历史生成结果。
  * 采用 Pinterest / 小红书风格瀑布流网格。
  */
 export default function EndlessGallery() {
+  const provider = useProvider();
   const { pathname } = useLocation();
   const navigate = useNavigate();
   const taskGroups = useTaskStore((s) => s.taskGroups);
@@ -107,9 +110,8 @@ export default function EndlessGallery() {
       config_json.grok_mode = 'i2v';
       config_json.seconds = batchGrokDuration;
     } else {
-      model = aspectRatio === '16:9' 
-        ? 'veo_3_1_i2v_s_fast_ultra_relaxed' 
-        : 'veo_3_1_i2v_s_fast_portrait_ultra_relaxed';
+      const orientKey = aspectRatio === '16:9' ? 'toolbox_i2v_landscape' : 'toolbox_i2v_portrait';
+      model = getDefaultModel(provider, orientKey);
       config_json.model = model;
     }
 
@@ -272,9 +274,8 @@ export default function EndlessGallery() {
       config_json.grok_mode = 'i2v';
       config_json.seconds = grokDuration;
     } else {
-      model = aspectRatio === '16:9' 
-        ? 'veo_3_1_i2v_s_fast_ultra_relaxed' 
-        : 'veo_3_1_i2v_s_fast_portrait_ultra_relaxed';
+      const orientKey = aspectRatio === '16:9' ? 'toolbox_i2v_landscape' : 'toolbox_i2v_portrait';
+      model = getDefaultModel(provider, orientKey);
       config_json.model = model;
     }
 

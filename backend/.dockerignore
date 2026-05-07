@@ -1,0 +1,38 @@
+# 虚拟环境（host 上的 venv 不能进容器，会跟容器里的 Python 路径冲突）
+venv/
+.venv/
+env/
+ENV/
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 运行时数据（构建镜像时不该带进去）
+uploads/
+outputs/
+logs/
+*.db
+*.sqlite
+*.sqlite3
+
+# 测试 — 镜像不需要带，开发期通过 bind mount 进
+tests/
+
+# 敏感
+.env
+.env.local
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp

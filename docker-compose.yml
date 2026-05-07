@@ -35,6 +35,11 @@ services:
       - "8011:8000"
     volumes:
       - ./backend:/app
+      # 屏蔽 host 上的 venv/缓存（防止覆盖容器里 Python 包路径）
+      - /app/venv
+      - /app/.venv
+      - /app/__pycache__
+      - /app/.pytest_cache
       - outputs_data:/app/outputs
 
     environment:
@@ -43,7 +48,8 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - CELERY_TASK_ALWAYS_EAGER=False
     extra_hosts:
-      - "wsl.local:${WSL_IP}"
+      # 用 Docker 的 magic host-gateway，免去手动设 WSL_IP
+      - "wsl.local:host-gateway"
     env_file: .env
     restart: unless-stopped
     command: sh -c "alembic upgrade head || echo 'Alembic skipped/failed' && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
@@ -59,6 +65,10 @@ services:
       - backend
     volumes:
       - ./backend:/app
+      - /app/venv
+      - /app/.venv
+      - /app/__pycache__
+      - /app/.pytest_cache
       - outputs_data:/app/outputs
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-followmeeeaigc}:${POSTGRES_PASSWORD:-followmeeeaigc_pass}@db:5432/${POSTGRES_DB:-followmeeeaigc_db}
@@ -67,7 +77,7 @@ services:
       - CELERY_TASK_ALWAYS_EAGER=False
       - MAX_CONCURRENT_TASKS=${MAX_CONCURRENT_TASKS:-4}
     extra_hosts:
-      - "wsl.local:${WSL_IP}"
+      - "wsl.local:host-gateway"
     env_file: .env
     restart: unless-stopped
     command: sh -c "celery -A app.workers.celery_app worker --loglevel=info -c ${MAX_CONCURRENT_TASKS:-4}"

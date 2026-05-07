@@ -4,6 +4,7 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 from typing import List
 from app.routers.auth import get_current_user
 from app.models.user import User
+from app.utils.logger import logger
 
 router = APIRouter(prefix="/api/upload", tags=["upload"])
 
@@ -21,16 +22,17 @@ MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
 CHUNK_SIZE = 1024 * 1024  # 1MB per chunk
 
 
-def _validate_magic_number(header: bytes, ext: str) -> bool:
-    """通过文件头字节校验真实文件类型是否与后缀匹配"""
-    for signature, allowed_exts in IMAGE_SIGNATURES.items():
-        if header.startswith(signature):
-            if ext in allowed_exts:
-                return True
-            # WebP 需额外检查第 8-12 字节为 "WEBP"
-            if signature == b"RIFF" and ext == ".webp":
-                return len(header) >= 12 and header[8:12] == b"WEBP"
-    return False
+def _detect_real_ext(header: bytes) -> str | None:
+    """按文件头 magic number 推断真实扩展名；推不出返回 None。"""
+    if header.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if header.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if header.startswith(b"GIF87a") or header.startswith(b"GIF89a"):
+        return ".gif"
+    if header.startswith(b"RIFF") and len(header) >= 12 and header[8:12] == b"WEBP":
+        return ".webp"
+    return None
 
 
 @router.post("/")
@@ -44,21 +46,30 @@ async def upload_files(
         if not file.filename:
             continue
             
-        ext = os.path.splitext(file.filename)[1].lower()
-        if ext not in ALLOWED_EXTENSIONS:
-            raise HTTPException(status_code=400, detail=f"不支持的文件格式: {ext}")
-            
-        new_filename = f"{uuid.uuid4().hex}{ext}"
-        filepath = os.path.join("uploads", new_filename)
-        
+        claimed_ext = os.path.splitext(file.filename)[1].lower()
+
         try:
-            # 读取文件头用于 Magic Number 校验
+            # 读取文件头，按 magic number 决定真实扩展名（无视用户名称的扩展名）
             header = await file.read(16)
-            if not _validate_magic_number(header, ext):
+            real_ext = _detect_real_ext(header)
+            if real_ext is None:
+                logger.warning(
+                    f"Upload rejected: not a recognized image (filename={file.filename!r}, "
+                    f"content_type={file.content_type}, header_hex={header.hex()})"
+                )
                 raise HTTPException(
                     status_code=400,
-                    detail=f"文件内容与后缀 {ext} 不匹配，疑似伪造文件"
+                    detail="无法识别的图片格式（仅支持 JPG/PNG/WebP/GIF）"
                 )
+
+            if claimed_ext != real_ext:
+                logger.info(
+                    f"Upload ext corrected: {file.filename!r} claimed {claimed_ext}, real is {real_ext}"
+                )
+
+            ext = real_ext
+            new_filename = f"{uuid.uuid4().hex}{ext}"
+            filepath = os.path.join("uploads", new_filename)
             
             # 分块写入，避免大文件一次性占满内存
             total_size = len(header)
@@ -72,6 +83,10 @@ async def upload_files(
                     if total_size > MAX_FILE_SIZE:
                         f.close()
                         os.remove(filepath)
+                        logger.warning(
+                            f"Upload rejected: too large (filename={file.filename!r}, "
+                            f"size>={total_size}, limit={MAX_FILE_SIZE})"
+                        )
                         raise HTTPException(
                             status_code=400,
                             detail=f"文件大小超过限制 ({MAX_FILE_SIZE // 1024 // 1024}MB)"

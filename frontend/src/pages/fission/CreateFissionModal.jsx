@@ -1,12 +1,16 @@
 import React, { useState, useEffect } from 'react';
 import { X, Upload, Zap, Rocket, Loader2 } from 'lucide-react';
 import api from '../../api/client';
+import { useProvider } from '../../hooks/useProvider';
+import { VIDEO_MODELS, getDefaultModel } from '../../constants/models';
 
 export default function CreateFissionModal({ onClose, onSuccess, initialData = null }) {
+  const provider = useProvider();
+  const isHolo = provider === 'holo';
   const [file, setFile] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [taskTitle, setTaskTitle] = useState('');
-  const [videoModel, setVideoModel] = useState('veo_3_1_i2v_s_fast_portrait_ultra_relaxed');
+  const [videoModel, setVideoModel] = useState(getDefaultModel(provider, 'fission_video'));
   const [globalPrompt, setGlobalPrompt] = useState('');
   const [fissionCount, setFissionCount] = useState(4);
   const [aspectRatio, setAspectRatio] = useState('9:16');
@@ -17,7 +21,7 @@ export default function CreateFissionModal({ onClose, onSuccess, initialData = n
       setTaskTitle(initialData.title || '');
       setGlobalPrompt(initialData.global_prompt || '');
       if (initialData.config_json) {
-        setVideoModel(initialData.config_json.videoModel || 'veo_3_1_i2v_s_fast_portrait_ultra_relaxed');
+        setVideoModel(initialData.config_json.videoModel || getDefaultModel(provider, 'fission_video'));
         setFissionCount(initialData.config_json.count || 4);
         setAspectRatio(initialData.config_json.aspectRatio || '9:16');
       }
@@ -206,9 +210,22 @@ export default function CreateFissionModal({ onClose, onSuccess, initialData = n
           <span className="text-[10px] font-bold uppercase tracking-wider" style={{ color: 'var(--text-tertiary)' }}>预选视频引擎</span>
           <select value={videoModel} onChange={e => setVideoModel(e.target.value)}
             className={inputClass + " cursor-pointer"} style={inputStyle}>
-            <option value="veo_3_1_i2v_s_fast_portrait_ultra_relaxed">Veo Relax (高品质追求)</option>
-            <option value="veo_3_1_i2v_s_fast_portrait_ultra_fl">Veo Fast (效率优先)</option>
-            <option value="veo_i2v_lite">Veo I2V Lite (首帧，轻量化)</option>
+            {isHolo ? (
+              <>
+                {VIDEO_MODELS.holo.i2v.portrait.map(o => (
+                  <option key={o.value} value={o.value}>{o.label}（竖）</option>
+                ))}
+                {VIDEO_MODELS.holo.i2v.landscape.map(o => (
+                  <option key={o.value} value={o.value}>{o.label}（横）</option>
+                ))}
+              </>
+            ) : (
+              <>
+                <option value="veo_3_1_i2v_s_fast_portrait_ultra_relaxed">Veo Relax (高品质追求)</option>
+                <option value="veo_3_1_i2v_s_fast_portrait_ultra_fl">Veo Fast (效率优先)</option>
+                <option value="veo_i2v_lite">Veo I2V Lite (首帧，轻量化)</option>
+              </>
+            )}
           </select>
         </div>
 

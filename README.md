@@ -56,7 +56,7 @@ Standard generation modes for quick one-off tasks:
 | **Cache/Queue** | Redis 7 |
 | **Proxy** | Nginx (Alpine) |
 | **AI Models** | Gemini (image), Veo (video), DeepSeek (prompt expansion) |
-| **AI Gateway** | Flow2API (OpenAI-compatible endpoint) |
+| **AI Gateway** | **HOLO API** (async submit-poll-download, hosted) **or** Flow2API (OpenAI-compatible SSE, self-hosted). Toggled via `AI_PROVIDER` in `.env` |
 | **Container** | Docker Compose |
 
 ---
@@ -66,7 +66,7 @@ Standard generation modes for quick one-off tasks:
 ### Prerequisites
 
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed and running
-- AI API keys (Gemini / Veo via Flow2API, DeepSeek)
+- AI API keys — either a **HOLO** key (single key for both image & video, recommended) **or** Flow2API self-hosted gateway + DeepSeek
 
 ### 1. Clone & Configure
 
@@ -81,9 +81,16 @@ Create a `.env` file in the project root:
 # Required
 SECRET_KEY=your-secret-key-here
 
-# AI Service
+# AI Provider — pick one
+AI_PROVIDER=holo                              # or "flow2api"
+AI_API_URL=https://api.dealonhorizon.us       # HOLO base URL
+AI_API_KEY=your-holo-bearer-key
+# (Optional) HOLO polling knobs
+AI_POLL_TIMEOUT=600
+AI_POLL_INTERVAL=5.0
+
+# DeepSeek (prompt expansion, system-level)
 DEEPSEEK_API_KEY=your-deepseek-api-key
-DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
 
 # Database (matches docker-compose defaults)
 DATABASE_URL=postgresql://followmeeeaigc:followmeeeaigc@db:5432/followmeeeaigc
@@ -94,6 +101,8 @@ REDIS_URL=redis://redis:6379/0
 # CORS
 CORS_ORIGINS=http://localhost:80,http://localhost:5173
 ```
+
+> Switching back to Flow2API: set `AI_PROVIDER=flow2api`, point `AI_API_URL` at your gateway (e.g. `http://127.0.0.1:8088`), restart backend + worker. The same model dropdowns will swap to the legacy `*_ultra` / `*_ultra_relaxed` options automatically.
 
 ### 2. Launch
 
@@ -119,8 +128,33 @@ Open your browser and navigate to **http://localhost:80**
 
 1. **Register** an account on the login page
 2. Open **Settings** (gear icon in sidebar)
-3. Enter your **Gemini API Key** and **Veo API Key**
+3. (HOLO mode) the global key in `.env` already covers everything; **Gemini Key / Veo Key** in user settings can be left empty or both filled with the same HOLO key for per-user isolation. (Flow2API mode) fill in the Gemini / Veo keys you provisioned for the gateway.
 4. Start creating!
+
+### Local Dev Mode (db+redis in Docker, backend+frontend native)
+
+Faster iteration than full-Docker — code edits hot-reload, logs go to local files:
+
+```bash
+docker compose up -d db redis           # only middleware
+
+cd backend
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+# In backend/.env, switch to local hosts:
+#   DATABASE_URL=postgresql://followmeeeaigc:followmeeeaigc_pass@127.0.0.1:5432/followmeeeaigc_db
+#   CELERY_BROKER_URL=redis://127.0.0.1:6379/0
+#   WEB_API_URL=http://127.0.0.1:8000
+.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+# Worker — Windows requires --pool=solo (or threads); prefork is unsupported.
+.venv\Scripts\python.exe -m celery -A app.workers.celery_app worker --loglevel=info --pool=solo
+
+cd ../frontend
+npm install
+npm run dev                              # Vite :5173
+```
+
+Browser → `http://localhost:5173` (Vite proxies `/api` → `127.0.0.1:8000`).
 
 ---
 

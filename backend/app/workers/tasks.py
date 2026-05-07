@@ -196,7 +196,8 @@ def update_group_status(db, group_id: str):
 
 async def notify_ws(user_id: int, message: dict, client: httpx.AsyncClient = None):
     try:
-        api_url = os.environ.get("WEB_API_URL", "http://backend:8000")
+        from app.config import settings as _s
+        api_url = os.environ.get("WEB_API_URL") or getattr(_s, "WEB_API_URL", None) or "http://127.0.0.1:8000"
         if client:
             await client.post(f"{api_url}/ws/internal/notify", json={"user_id": user_id, "message": message})
         else:

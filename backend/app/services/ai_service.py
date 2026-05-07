@@ -22,6 +22,36 @@ class GenerationResult:
         self.error = error
         self.file_ext = file_ext
 
+# 老 Flow2API 时代的视频模型别名 → HOLO 真实模型名
+# 映射策略：_ultra_relaxed → Lite 档（最便宜 720p），_ultra/_ultra_fl → Fast 档（中等 720p）
+LEGACY_MODEL_ALIASES = {
+    # T2V
+    "veo_3_1_t2v_fast_ultra":                    "veo_3_1_t2v_fast_landscape",
+    "veo_3_1_t2v_fast_portrait_ultra":           "veo_3_1_t2v_fast_portrait",
+    "veo_3_1_t2v_fast_ultra_relaxed":            "veo_3_1_t2v_lite_landscape",
+    "veo_3_1_t2v_fast_portrait_ultra_relaxed":   "veo_3_1_t2v_lite_portrait",
+    # I2V（旧名前缀 i2v_s_fast 在 HOLO 没有，根据后缀映射档位）
+    "veo_3_1_i2v_s_fast_ultra_fl":               "veo_3_1_i2v_fast_landscape",
+    "veo_3_1_i2v_s_fast_portrait_ultra_fl":      "veo_3_1_i2v_fast_portrait",
+    "veo_3_1_i2v_s_fast_ultra_relaxed":          "veo_3_1_i2v_lite_landscape",
+    "veo_3_1_i2v_s_fast_portrait_ultra_relaxed": "veo_3_1_i2v_lite_portrait",
+    # R2V
+    "veo_3_1_r2v_fast_ultra":                    "veo_3_1_r2v_fast_landscape",
+    "veo_3_1_r2v_fast_portrait_ultra":           "veo_3_1_r2v_fast_portrait",
+    "veo_3_1_r2v_fast_ultra_relaxed":            "veo_3_1_r2v_lite_landscape",
+    "veo_3_1_r2v_fast_portrait_ultra_relaxed":   "veo_3_1_r2v_lite_portrait",
+}
+
+
+def normalize_holo_model(model: str) -> str:
+    """老别名透明翻译为 HOLO 真名；未命中则原样返回。"""
+    if model in LEGACY_MODEL_ALIASES:
+        new = LEGACY_MODEL_ALIASES[model]
+        logger.info(f"Model alias: {model} → {new}")
+        return new
+    return model
+
+
 def get_mime_type(image_path: str) -> str:
     ext = os.path.splitext(image_path)[1].lower()
     mime_map = {
@@ -166,7 +196,12 @@ class AIClient:
                 result = await self.generate(current_model, prompt, image_paths, progress_callback, api_key=api_key)
                 if result.success:
                     return result
-                
+
+                # HOLO 已自动退款的终态（content policy / cancelled），不再重试以免无意义烧配额
+                if getattr(result, "_terminal", False):
+                    logger.info(f"Generation terminal (refunded), skip retries: {result.error}")
+                    return result
+
                 error_str = str(result.error)
                 last_error = error_str
                 logger.warning(f"Generation attempt {attempt + 1} failed: {error_str}")
@@ -185,6 +220,168 @@ class AIClient:
         return res
 
     async def generate(self, model: str, prompt: str, image_paths: list[str] | None = None, progress_callback: Callable[[str], None] = None, api_key: str = None) -> GenerationResult:
+        """统一入口；按 settings.AI_PROVIDER 分发到 flow2api 或 holo。"""
+        from app.utils.scheduler import wait_for_api_slot
+        await wait_for_api_slot(api_type="gemini_veo")
+
+        provider = (getattr(settings, "AI_PROVIDER", "flow2api") or "flow2api").lower()
+        if provider == "holo":
+            return await self._generate_holo(model, prompt, image_paths, progress_callback, api_key)
+        return await self._generate_flow2api(model, prompt, image_paths, progress_callback, api_key)
+
+    async def _generate_holo(self, model: str, prompt: str, image_paths: list[str] | None = None, progress_callback: Callable[[str], None] = None, api_key: str = None) -> GenerationResult:
+        """HOLO API: 提交 → 轮询 → 下载。"""
+        result = GenerationResult()
+        model = normalize_holo_model(model)
+        is_video = any(k in model.lower() for k in ["veo", "t2v", "i2v", "r2v"])
+        active_key = api_key if api_key else self.api_key
+        headers = {
+            "Authorization": f"Bearer {active_key}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            messages = await self._build_messages(prompt, image_paths)
+            payload = {"model": model, "messages": messages}
+            client = await self._get_client()
+
+            # --- 1. SUBMIT ---
+            if progress_callback:
+                await progress_callback("正在提交生成任务...")
+            try:
+                submit_resp = await client.post(
+                    f"{self.base_url}/v1/generate",
+                    json=payload, headers=headers, timeout=60.0,
+                )
+            except (httpx.ReadError, httpx.ConnectError, httpx.RemoteProtocolError) as e:
+                result.error = f"提交请求异常: {e}"
+                return result
+
+            if submit_resp.status_code not in (200, 202):
+                body = submit_resp.text
+                result.error = f"Submit HTTP {submit_resp.status_code}: {body[:300]}"
+                return result
+
+            try:
+                submit_data = submit_resp.json()
+            except ValueError:
+                result.error = f"Submit 返回非 JSON: {submit_resp.text[:200]}"
+                return result
+
+            task_id = submit_data.get("task_id")
+            if not task_id:
+                result.error = f"Submit 未返回 task_id: {submit_data}"
+                return result
+
+            queue_pos = submit_data.get("position")
+            if progress_callback:
+                if queue_pos is not None:
+                    await progress_callback(f"已排队 (位置 {queue_pos})...")
+                else:
+                    await progress_callback("已提交，等待处理...")
+
+            # --- 2. POLL ---
+            poll_url = f"{self.base_url}/v1/tasks/{task_id}"
+            poll_interval = float(getattr(settings, "AI_POLL_INTERVAL", 5.0))
+            max_wait = float(getattr(settings, "AI_POLL_TIMEOUT", 600))
+            elapsed = 0.0
+            last_status = None
+            file_url = None
+            file_ext_hint = None
+
+            while elapsed < max_wait:
+                await asyncio.sleep(poll_interval)
+                elapsed += poll_interval
+                try:
+                    poll_resp = await client.get(poll_url, headers=headers, timeout=30.0)
+                except (httpx.ReadError, httpx.ConnectError, httpx.RemoteProtocolError) as e:
+                    logger.warning(f"Poll transient error: {e}")
+                    continue
+
+                if poll_resp.status_code == 404:
+                    result.error = f"Task {task_id} 不存在或已过期"
+                    return result
+                if poll_resp.status_code != 200:
+                    logger.warning(f"Poll HTTP {poll_resp.status_code}, retrying")
+                    continue
+
+                try:
+                    body = poll_resp.json()
+                except ValueError:
+                    continue
+
+                status = body.get("status")
+                if status != last_status:
+                    last_status = status
+                    if progress_callback:
+                        if status == "queued":
+                            pos = body.get("position")
+                            await progress_callback(f"排队中 (位置 {pos})..." if pos is not None else "排队中...")
+                        elif status == "processing":
+                            await progress_callback("AI 正在生成...")
+
+                if status == "completed":
+                    res_obj = body.get("result") or {}
+                    file_url = res_obj.get("file_url")
+                    file_ext_hint = res_obj.get("file_ext")
+                    break
+                if status in ("failed", "cancelled"):
+                    err = body.get("error") or status
+                    result.error = f"Task {status}: {err}"
+                    # HOLO 已自动退款，标记终态避免上层重试烧配额
+                    result._terminal = True
+                    return result
+                # else queued/processing → 继续轮询
+            else:
+                result.error = f"轮询超时 ({max_wait}s, task_id={task_id})"
+                return result
+
+            if not file_url:
+                result.error = "已 completed 但缺少 file_url"
+                return result
+
+            # --- 3. DOWNLOAD ---
+            if progress_callback:
+                await progress_callback("正在下载结果...")
+            full_url = file_url if file_url.startswith("http") else f"{self.base_url}{file_url}"
+            for dl_attempt in range(3):
+                try:
+                    dl = await client.get(
+                        full_url, headers=headers,
+                        timeout=httpx.Timeout(400.0, connect=60.0, read=400.0),
+                        follow_redirects=True,
+                    )
+                    if dl.status_code == 200 and len(dl.content) > 100:
+                        result.data = dl.content
+                        result.success = True
+                        if file_ext_hint:
+                            ext = file_ext_hint if file_ext_hint.startswith(".") else f".{file_ext_hint}"
+                            ext_low = ext.lower()
+                            mime_map = {
+                                ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                                ".webp": "image/webp", ".mp4": "video/mp4",
+                            }
+                            result.file_ext = ext_low
+                            result.mime_type = mime_map.get(ext_low, "application/octet-stream")
+                            result.media_type = "video" if ext_low == ".mp4" else "image"
+                            return result
+                        # 没给 file_ext 就嗅探
+                        return await self._detect_file_type(result, is_video)
+                    result.error = f"下载文件失败: HTTP {dl.status_code}"
+                    break
+                except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError) as e:
+                    logger.warning(f"DL attempt {dl_attempt+1} failed: {e}")
+                    if dl_attempt == 2:
+                        result.error = f"下载文件异常: {e}"
+                    await asyncio.sleep(1)
+            return result
+
+        except Exception as e:
+            logger.error(f"HOLO generation failed: {e}")
+            return GenerationResult(success=False, error=str(e))
+
+    async def _generate_flow2api(self, model: str, prompt: str, image_paths: list[str] | None = None, progress_callback: Callable[[str], None] = None, api_key: str = None) -> GenerationResult:
+        """Flow2API: OpenAI 兼容流式 SSE。"""
         url = f"{self.base_url}/v1/chat/completions"
         messages = await self._build_messages(prompt, image_paths)
         payload = {"model": model, "messages": messages, "stream": True}
@@ -198,9 +395,6 @@ class AIClient:
         }
 
         try:
-            from app.utils.scheduler import wait_for_api_slot
-            await wait_for_api_slot(api_type="gemini_veo")
-
             client = await self._get_client()
             collected_content = ""
             async with client.stream("POST", url, json=payload, headers=headers) as response:

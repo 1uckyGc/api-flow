@@ -24,6 +24,13 @@ class Settings(BaseSettings):
     # AI APIs
     AI_API_URL: str = "http://localhost:8000"
     AI_API_KEY: str = ""
+    AI_PROVIDER: str = "flow2api"  # "flow2api" (SSE 流式) | "holo" (异步轮询)
+    AI_POLL_TIMEOUT: int = 600     # HOLO 轮询超时（秒）
+    AI_POLL_INTERVAL: float = 5.0  # HOLO 轮询间隔（秒）
+
+    # Worker 推 WS 通知到 backend 的内部地址
+    # Docker: http://backend:8000；本地: http://127.0.0.1:8000
+    WEB_API_URL: str = "http://127.0.0.1:8000"
     
     # DeepSeek
     DEEPSEEK_API_KEY: str = ""

@@ -1,5 +1,7 @@
 import React, { useState } from 'react';
 import { Video, X, Sparkles, Wand2 } from 'lucide-react';
+import { useProvider } from '../../hooks/useProvider';
+import { VIDEO_MODELS, getDefaultModel } from '../../constants/models';
 
 function parseTaskAction(rawPrompt) {
   if (!rawPrompt) return '';
@@ -10,8 +12,12 @@ function parseTaskAction(rawPrompt) {
 }
 
 export default function VideoMotionModal({ targetTasks, onClose, onConfirm, submitting, defaultModel }) {
+  const provider = useProvider();
+  const isHolo = provider === 'holo';
   const [prompts, setPrompts] = useState({});
-  const [videoModel, setVideoModel] = useState(defaultModel || 'veo_3_1_i2v_s_fast_portrait_ultra_relaxed');
+  const [videoModel, setVideoModel] = useState(
+    defaultModel || getDefaultModel(provider, 'director_video')
+  );
 
   const handleChange = (taskId, val) => {
     setPrompts(p => ({ ...p, [taskId]: val }));
@@ -67,12 +73,25 @@ export default function VideoMotionModal({ targetTasks, onClose, onConfirm, subm
             className="w-full rounded-lg px-2.5 py-2 text-xs cursor-pointer focus:outline-none transition-all"
             style={selectStyle}
           >
-            <option value="veo_3_1_i2v_s_fast_portrait_ultra_relaxed">Veo 3.1 Relax（竖屏）</option>
-            <option value="veo_3_1_i2v_s_fast_ultra_relaxed">Veo 3.1 Relax（横屏）</option>
-            <option value="veo_3_1_i2v_s_fast_portrait_ultra_fl">Veo 3.1 Fast（竖屏）</option>
-            <option value="veo_3_1_i2v_s_fast_ultra_fl">Veo 3.1 Fast（横屏）</option>
-            <option value="veo_3_1_i2v_lite_portrait">Veo 3.1 I2V Lite（竖屏）</option>
-            <option value="veo_3_1_i2v_lite_landscape">Veo 3.1 I2V Lite（横屏）</option>
+            {isHolo ? (
+              <>
+                {VIDEO_MODELS.holo.i2v.portrait.map(o => (
+                  <option key={o.value} value={o.value}>{o.label}（竖）</option>
+                ))}
+                {VIDEO_MODELS.holo.i2v.landscape.map(o => (
+                  <option key={o.value} value={o.value}>{o.label}（横）</option>
+                ))}
+              </>
+            ) : (
+              <>
+                <option value="veo_3_1_i2v_s_fast_portrait_ultra_relaxed">Veo 3.1 Relax（竖屏）</option>
+                <option value="veo_3_1_i2v_s_fast_ultra_relaxed">Veo 3.1 Relax（横屏）</option>
+                <option value="veo_3_1_i2v_s_fast_portrait_ultra_fl">Veo 3.1 Fast（竖屏）</option>
+                <option value="veo_3_1_i2v_s_fast_ultra_fl">Veo 3.1 Fast（横屏）</option>
+                <option value="veo_3_1_i2v_lite_portrait">Veo 3.1 I2V Lite（竖屏）</option>
+                <option value="veo_3_1_i2v_lite_landscape">Veo 3.1 I2V Lite（横屏）</option>
+              </>
+            )}
           </select>
         </div>
 

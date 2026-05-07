@@ -3,13 +3,19 @@ import { useLocation } from 'react-router-dom';
 import { Upload, Settings, FileSpreadsheet, Sparkles } from 'lucide-react';
 import api from '../../api/client';
 import useTaskStore from '../../stores/useTaskStore';
+import { useProvider } from '../../hooks/useProvider';
+import {
+  VIDEO_MODELS, IMAGE_MODELS, getDefaultModel, mapModelForFlow2API, aspectToOrientation,
+} from '../../constants/models';
 
 export default function Toolbox() {
   const location = useLocation();
   const path = location.pathname;
-  
+  const provider = useProvider(); // "holo" | "flow2api"
+  const isHolo = provider === 'holo';
+
   const [prompts, setPrompts] = useState('');
-  const [model, setModel] = useState('veo_t2v_ultra_relaxed');
+  const [model, setModel] = useState(getDefaultModel(provider, 'toolbox_t2v_portrait'));
   const [resolution, setResolution] = useState('standard');
   const [aspectRatio, setAspectRatio] = useState('9:16');
   const [imagesPerPrompt, setImagesPerPrompt] = useState(4);
@@ -20,35 +26,62 @@ export default function Toolbox() {
   const draftData = useTaskStore((s) => s.draftData);
   const setDraftData = useTaskStore((s) => s.setDraftData);
 
-  // 挂载时如果有 Draft 数据则回填，否则按路由设默认模型
+  // 挂载时如果有 Draft 数据则回填，否则按路由+provider 设默认模型
   useEffect(() => {
     if (draftData) {
       if (draftData.prompts) setPrompts(draftData.prompts);
       if (draftData.aspectRatio) setAspectRatio(draftData.aspectRatio);
       if (draftData.files) setFiles(draftData.files);
-      
-      // 需要做去马甲处理，把底层模型还原为前台路由能认的模型 select value
+
+      // 把底层模型还原为前台 select 能认的值
       const m = draftData.model;
       if (m?.includes('veo') && m?.includes('t2v')) {
-         setModel(m?.includes('relaxed') ? 'veo_t2v_ultra_relaxed' : 'veo_t2v_ultra');
+        if (isHolo) {
+          setModel(m); // HOLO 直接用实名
+        } else {
+          setModel(m?.includes('relaxed') ? 'veo_t2v_ultra_relaxed' : 'veo_t2v_ultra');
+        }
       } else if (m?.includes('veo') && (m?.includes('i2v') || m?.includes('r2v'))) {
-         setModel(m?.includes('relaxed') ? 'veo_i2v_ultra_relaxed' : 'veo_i2v_ultra');
-         setI2vMode(m?.includes('r2v') ? 'r2v' : 'i2v');
+        if (isHolo) {
+          setModel(m);
+        } else {
+          setModel(m?.includes('relaxed') ? 'veo_i2v_ultra_relaxed' : 'veo_i2v_ultra');
+        }
+        setI2vMode(m?.includes('r2v') ? 'r2v' : 'i2v');
       } else if (m?.includes('gemini')) {
-         setModel(m);
+        // 图像模型保留短别名（不带 -portrait 后缀）让选择器能命中
+        setModel(m.replace(/-(landscape|portrait|square|four-three|three-four)(-2k|-4k)?$/, ''));
       }
       setDraftData(null);
     } else {
-      // 没有任何 draft 传入时触发普通路由预设检查
-      if (path.includes('t2i')) setModel('gemini-3.0-pro-image');
-      else if (path.includes('i2i')) setModel('gemini-3.0-pro-image');
-      else if (path.includes('i2v')) setModel('veo_i2v_ultra_relaxed');
-      else setModel('veo_t2v_ultra_relaxed');
-      
-      // Reset secondary mode when switching base paths
+      // 没 draft，按 provider × 路由 选默认值
+      const orient = aspectToOrientation(aspectRatio);
+      if (path.includes('t2i') || path.includes('i2i')) {
+        setModel('gemini-3.0-pro-image');
+      } else if (path.includes('i2v')) {
+        setModel(getDefaultModel(provider, `toolbox_i2v_${orient}`));
+      } else {
+        setModel(getDefaultModel(provider, `toolbox_t2v_${orient}`));
+      }
       if (!path.includes('i2v')) setI2vMode('i2v');
     }
-  }, [path, draftData, setDraftData]);
+  }, [path, draftData, setDraftData, provider]);
+
+  // HOLO 模式下，aspectRatio 改变需重选同档 orientation 模型
+  useEffect(() => {
+    if (!isHolo) return;
+    if (path.includes('t2i') || path.includes('i2i')) return; // 图像模型由后缀拼接
+    const newOrient = aspectToOrientation(aspectRatio);
+    // 已经匹配的话不动
+    if (model.includes(newOrient)) return;
+    const kind = path.includes('i2v') ? 'i2v' : 't2v';
+    // 在新 orientation 列表里挑一个保留同档（lite/fast/quality）的，挑不到就第一个
+    const newList = VIDEO_MODELS.holo[kind][newOrient];
+    if (!newList || newList.length === 0) return;
+    const tier = model.includes('_lite_') ? 'lite' : model.includes('_fast_') ? 'fast' : 's';
+    const same = newList.find(o => o.value.includes(`_${tier}_`));
+    setModel((same || newList[0]).value);
+  }, [aspectRatio, isHolo, path]);
 
   const handleClear = () => {
     setPrompts('');
@@ -103,31 +136,36 @@ export default function Toolbox() {
         return;
       }
 
-    // 根据所选模型和方向拼接最终提交给 flow2api 的模型字符串
+    // 拼最终提交模型名
     let finalModel = model;
-    
+
     if (model.includes('gemini')) {
+      // 图像：短别名 + ratio 后缀（HOLO 与 flow2api 都吃这种命名）
       let ratioSuffix = '-portrait';
       if (aspectRatio === '16:9') ratioSuffix = '-landscape';
       if (aspectRatio === '1:1') ratioSuffix = '-square';
       finalModel = model + ratioSuffix;
       if (resolution === '2k') finalModel += '-2k';
       if (resolution === '4k') finalModel += '-4k';
-    } else if (model === 'veo_t2v_ultra') {
-      finalModel = aspectRatio === '16:9' ? 'veo_3_1_t2v_fast_ultra' : 'veo_3_1_t2v_fast_portrait_ultra';
-    } else if (model === 'veo_t2v_ultra_relaxed') {
-      finalModel = aspectRatio === '16:9' ? 'veo_3_1_t2v_fast_ultra_relaxed' : 'veo_3_1_t2v_fast_portrait_ultra_relaxed';
-    } else if (model === 'veo_i2v_ultra') {
+    } else if (isHolo) {
+      // HOLO 视频：dropdown value 已经是 API 实名，r2v 模式需要换前缀
       if (path.includes('i2v') && i2vMode === 'r2v') {
-        finalModel = aspectRatio === '16:9' ? 'veo_3_1_r2v_fast_ultra' : 'veo_3_1_r2v_fast_portrait_ultra';
-      } else {
-        finalModel = aspectRatio === '16:9' ? 'veo_3_1_i2v_s_fast_ultra_fl' : 'veo_3_1_i2v_s_fast_portrait_ultra_fl';
+        // 把 i2v_lite_/i2v_fast_/i2v_s_ 替换为 r2v_lite_/r2v_fast_（HOLO r2v 没 quality）
+        finalModel = model
+          .replace('_i2v_s_', '_r2v_fast_')
+          .replace('_i2v_fast_', '_r2v_fast_')
+          .replace('_i2v_lite_', '_r2v_lite_');
       }
-    } else if (model === 'veo_i2v_ultra_relaxed') {
-      if (path.includes('i2v') && i2vMode === 'r2v') {
-        finalModel = aspectRatio === '16:9' ? 'veo_3_1_r2v_fast_ultra_relaxed' : 'veo_3_1_r2v_fast_portrait_ultra_relaxed';
+    } else {
+      // flow2api 老短别名 → API 实名
+      if ((path.includes('i2v') && i2vMode === 'r2v') &&
+          (model === 'veo_i2v_ultra' || model === 'veo_i2v_ultra_relaxed')) {
+        const isLandscape = aspectRatio === '16:9';
+        finalModel = model === 'veo_i2v_ultra'
+          ? (isLandscape ? 'veo_3_1_r2v_fast_ultra'         : 'veo_3_1_r2v_fast_portrait_ultra')
+          : (isLandscape ? 'veo_3_1_r2v_fast_ultra_relaxed' : 'veo_3_1_r2v_fast_portrait_ultra_relaxed');
       } else {
-        finalModel = aspectRatio === '16:9' ? 'veo_3_1_i2v_s_fast_ultra_relaxed' : 'veo_3_1_i2v_s_fast_portrait_ultra_relaxed';
+        finalModel = mapModelForFlow2API(model, aspectRatio);
       }
     }
 
@@ -341,22 +379,26 @@ export default function Toolbox() {
                   className={selectClass}
                   style={selectStyle}
                 >
-                  {path.includes('i2v') ? (
-                    <>
-                      <option value="veo_i2v_ultra">VEO 3.1 Ultra (极速超清)</option>
-                      <option value="veo_i2v_ultra_relaxed">VEO 3.1 Ultra Relax版 (队列休闲)</option>
-                    </>
-                  ) : path.includes('t2i') || path.includes('i2i') ? (
-                    <>
-                      <option value="gemini-3.1-flash-image">Gemini 3.1 Flash</option>
-                      <option value="gemini-3.0-pro-image">Gemini 3.0 Pro</option>
-                    </>
-                  ) : (
-                    <>
-                      <option value="veo_t2v_ultra">VEO 3.1 Ultra (极速超清)</option>
-                      <option value="veo_t2v_ultra_relaxed">VEO 3.1 Ultra Relax版 (队列休闲)</option>
-                    </>
-                  )}
+                  {(() => {
+                    if (path.includes('t2i') || path.includes('i2i')) {
+                      return (
+                        <>
+                          <option value="gemini-3.1-flash-image">Gemini 3.1 Flash</option>
+                          <option value="gemini-3.0-pro-image">Gemini 3.0 Pro</option>
+                        </>
+                      );
+                    }
+                    const kind = path.includes('i2v') ? 'i2v' : 't2v';
+                    if (isHolo) {
+                      const orient = aspectToOrientation(aspectRatio);
+                      return VIDEO_MODELS.holo[kind][orient].map(o => (
+                        <option key={o.value} value={o.value}>{o.label}</option>
+                      ));
+                    }
+                    return VIDEO_MODELS.flow2api[kind].portrait.map(o => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ));
+                  })()}
                 </select>
               </div>
               <div>

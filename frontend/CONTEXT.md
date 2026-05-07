@@ -21,6 +21,10 @@ React + Vite SPA 的领域术语表。**两边都出现的术语，以 `backend/
 - **`useThemeStore`** — `theme` ∈ `{"dark", "light"}`，持久化。靠右上角太阳/月亮按钮切换。
 - **`useWorkshopStore`** — 工坊编辑器状态：节点列表、选中节点 id、流水线元信息（标题、描述）。**与 `useTaskStore` 各管一边** —— 即使工作流跑出来的结果是 task group，**run 的状态走 `useTaskStore`，build 阶段才用这个**。
 
+`hooks/` 下还有一个全局 hook：
+
+- **`useProvider`** — 启动时一次性 fetch `/api/config/ai-provider` 拿当前 AI 协议（`"holo"` 或 `"flow2api"`），用 zustand 缓存。所有视频模型下拉用它决定显示哪一套。fetch 在 `loaded` 标记触发后只跑一次（多个组件并发调用会复用同一个 `inFlight` Promise）。
+
 ### 实时契约
 
 - **WebSocket** — 每用户一条连接，由 `useTaskStore` 在登录后开。token 走路径段：`/ws/{token}`。
@@ -50,6 +54,7 @@ React + Vite SPA 的领域术语表。**两边都出现的术语，以 `backend/
 ### 配置载体
 
 - **`config_json`（前端使用）** — 创建裂变 / 导演 / 工作流组时，前端把按模式区分的字段塞进请求的 `config_json`。**字段定义权在后端**（见 `backend/CONTEXT.md`），新加键之前**必须先在某个 worker 里加读取逻辑**。
+- **`constants/models.js`** — 视频模型目录单一来源。结构 `VIDEO_MODELS[provider][kind][orientation] -> [{value, label}]`，覆盖 `flow2api` 与 `holo` 两套命名空间；`DEFAULT_MODELS[provider][context]` 给各场景（`director_video` / `fission_video` / `toolbox_t2v_portrait` 等）兜底默认值；`mapModelForFlow2API(alias, aspectRatio)` 把 Flow2API 短别名（`veo_t2v_ultra_relaxed`...）拼成最终 API 模型名（`veo_3_1_t2v_fast_portrait_ultra_relaxed`...），HOLO 分支的 dropdown value 已经是 API 实名，不走这个函数。**所有视频模型选项的真相在这里**，单点修改、多处生效。
 
 ### 主题
 

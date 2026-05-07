@@ -3,13 +3,19 @@ import { useLocation } from 'react-router-dom';
 import { Upload, X, Sparkles, RotateCcw, Loader2 } from 'lucide-react';
 import api from '../../api/client';
 import useTaskStore from '../../stores/useTaskStore';
+import { useProvider } from '../../hooks/useProvider';
+import {
+  VIDEO_MODELS, getDefaultModel, mapModelForFlow2API, aspectToOrientation,
+} from '../../constants/models';
 
 export default function ToolPanel() {
   const location = useLocation();
   const path = location.pathname;
+  const provider = useProvider();
+  const isHolo = provider === 'holo';
 
   const [prompts, setPrompts] = useState('');
-  const [model, setModel] = useState('veo_t2v_ultra_relaxed');
+  const [model, setModel] = useState(getDefaultModel(provider, 'toolbox_t2v_portrait'));
   const [resolution, setResolution] = useState('standard');
   const [aspectRatio, setAspectRatio] = useState('9:16');
   const [grokEditSize, setGrokEditSize] = useState('1024x1024');
@@ -30,7 +36,12 @@ export default function ToolPanel() {
       if (draftData.files) setFiles(draftData.files);
 
       const m = draftData.model;
-      if (m?.includes('t2v_lite')) {
+      if (m?.startsWith('grok-')) {
+        setModel(m);
+      } else if (isHolo && m?.includes('veo')) {
+        setModel(m);
+        if (m?.includes('r2v')) setI2vMode('r2v');
+      } else if (m?.includes('t2v_lite')) {
         setModel('veo_t2v_lite');
       } else if (m?.includes('interpolation_lite')) {
         setModel('veo_interpolation_lite');
@@ -42,18 +53,33 @@ export default function ToolPanel() {
         setModel(m?.includes('relaxed') ? 'veo_i2v_ultra_relaxed' : 'veo_i2v_ultra');
         setI2vMode(m?.includes('r2v') ? 'r2v' : 'i2v');
       } else if (m?.includes('gemini')) {
-        setModel(m);
+        setModel(m.replace(/-(landscape|portrait|square|four-three|three-four)(-2k|-4k)?$/, ''));
       }
       setDraftData(null);
     } else {
-      if (path.includes('t2i')) setModel('gemini-3.0-pro-image');
-      else if (path.includes('i2i')) setModel('gemini-3.0-pro-image');
-      else if (path.includes('i2v')) setModel('veo_i2v_ultra_relaxed');
-      else setModel('veo_t2v_ultra_relaxed');
+      const orient = aspectToOrientation(aspectRatio);
+      if (path.includes('t2i') || path.includes('i2i')) setModel('gemini-3.0-pro-image');
+      else if (path.includes('i2v')) setModel(getDefaultModel(provider, `toolbox_i2v_${orient}`));
+      else setModel(getDefaultModel(provider, `toolbox_t2v_${orient}`));
 
       if (!path.includes('i2v')) setI2vMode('i2v');
     }
-  }, [path, draftData, setDraftData]);
+  }, [path, draftData, setDraftData, provider]);
+
+  // HOLO 模式 aspectRatio 改变 → 同档位换 orientation
+  useEffect(() => {
+    if (!isHolo) return;
+    if (model.startsWith('grok-')) return;
+    if (path.includes('t2i') || path.includes('i2i')) return;
+    const newOrient = aspectToOrientation(aspectRatio);
+    if (model.includes(newOrient)) return;
+    const kind = path.includes('i2v') ? 'i2v' : 't2v';
+    const newList = VIDEO_MODELS.holo[kind][newOrient];
+    if (!newList || newList.length === 0) return;
+    const tier = model.includes('_lite_') ? 'lite' : model.includes('_fast_') ? 'fast' : 's';
+    const same = newList.find(o => o.value.includes(`_${tier}_`));
+    setModel((same || newList[0]).value);
+  }, [aspectRatio, isHolo, path]);
 
   const isGrokModel = model.startsWith('grok-');
   const isGrokVideo = isGrokModel && (model === 'grok-imagine-video-t2v' || model === 'grok-imagine-video-i2v');
@@ -122,41 +148,38 @@ export default function ToolPanel() {
 
     const ratioSuffix = aspectRatio === '16:9' ? 'landscape' : 'portrait';
     let finalModel = model;
-    if (model.includes('gemini')) {
+    if (model.startsWith('grok-')) {
+      finalModel = (model === 'grok-imagine-video-t2v' || model === 'grok-imagine-video-i2v')
+        ? 'grok-imagine-video' : model;
+    } else if (model.includes('gemini')) {
       let ratioSuffix2 = '-portrait';
       if (aspectRatio === '16:9') ratioSuffix2 = '-landscape';
       if (aspectRatio === '1:1') ratioSuffix2 = '-square';
       finalModel = model + ratioSuffix2;
       if (resolution === '2k') finalModel += '-2k';
       if (resolution === '4k') finalModel += '-4k';
-    } else if (model === 'veo_t2v_ultra') {
-      finalModel = aspectRatio === '16:9' ? 'veo_3_1_t2v_fast_ultra' : 'veo_3_1_t2v_fast_portrait_ultra';
-    } else if (model === 'veo_t2v_ultra_relaxed') {
-      finalModel = aspectRatio === '16:9' ? 'veo_3_1_t2v_fast_ultra_relaxed' : 'veo_3_1_t2v_fast_portrait_ultra_relaxed';
+    } else if (isHolo) {
+      // HOLO 视频：dropdown value 是实名；r2v 模式换前缀
+      if (path.includes('i2v') && i2vMode === 'r2v') {
+        finalModel = model
+          .replace('_i2v_s_', '_r2v_fast_')
+          .replace('_i2v_fast_', '_r2v_fast_')
+          .replace('_i2v_lite_', '_r2v_lite_');
+      }
     } else if (model === 'veo_t2v_lite') {
       finalModel = `veo_3_1_t2v_lite_${ratioSuffix}`;
-    } else if (model === 'veo_i2v_ultra') {
-      if (path.includes('i2v') && i2vMode === 'r2v') {
-        finalModel = aspectRatio === '16:9' ? 'veo_3_1_r2v_fast_ultra' : 'veo_3_1_r2v_fast_portrait_ultra';
-      } else {
-        finalModel = aspectRatio === '16:9' ? 'veo_3_1_i2v_s_fast_ultra_fl' : 'veo_3_1_i2v_s_fast_portrait_ultra_fl';
-      }
-    } else if (model === 'veo_i2v_ultra_relaxed') {
-      if (path.includes('i2v') && i2vMode === 'r2v') {
-        finalModel = aspectRatio === '16:9' ? 'veo_3_1_r2v_fast_ultra_relaxed' : 'veo_3_1_r2v_fast_portrait_ultra_relaxed';
-      } else {
-        finalModel = aspectRatio === '16:9' ? 'veo_3_1_i2v_s_fast_ultra_relaxed' : 'veo_3_1_i2v_s_fast_portrait_ultra_relaxed';
-      }
     } else if (model === 'veo_i2v_lite') {
       finalModel = `veo_3_1_i2v_lite_${ratioSuffix}`;
     } else if (model === 'veo_interpolation_lite') {
       finalModel = `veo_3_1_interpolation_lite_${ratioSuffix}`;
-    } else if (model === 'grok-imagine-image' || model === 'grok-imagine-image-pro') {
-      finalModel = model;
-    } else if (model === 'grok-imagine-image-edit') {
-      finalModel = 'grok-imagine-image-edit';
-    } else if (model === 'grok-imagine-video-t2v' || model === 'grok-imagine-video-i2v') {
-      finalModel = 'grok-imagine-video';
+    } else if ((path.includes('i2v') && i2vMode === 'r2v') &&
+               (model === 'veo_i2v_ultra' || model === 'veo_i2v_ultra_relaxed')) {
+      const isLandscape = aspectRatio === '16:9';
+      finalModel = model === 'veo_i2v_ultra'
+        ? (isLandscape ? 'veo_3_1_r2v_fast_ultra'         : 'veo_3_1_r2v_fast_portrait_ultra')
+        : (isLandscape ? 'veo_3_1_r2v_fast_ultra_relaxed' : 'veo_3_1_r2v_fast_portrait_ultra_relaxed');
+    } else {
+      finalModel = mapModelForFlow2API(model, aspectRatio);
     }
 
     const expandedTasks = [];
@@ -357,38 +380,55 @@ export default function ToolPanel() {
               value={model} onChange={(e) => setModel(e.target.value)}
               className={selectClass} style={selectStyle}
             >
-              {path.includes('i2v') ? (
-                <>
-                  <option value="veo_i2v_ultra">VEO 3.1 Ultra — 极速模式</option>
-                  <option value="veo_i2v_ultra_relaxed">VEO 3.1 Ultra Relax — 休闲模式</option>
-                  <option value="veo_i2v_lite">VEO 3.1 I2V Lite — 首帧</option>
-                  <option value="veo_interpolation_lite">VEO 3.1 Interpolation Lite — 首尾帧</option>
-                  <option disabled>──── Grok ────</option>
-                  <option value="grok-imagine-video-i2v">Grok Imagine Video — 图生视频 (Super+)</option>
-                </>
-              ) : path.includes('t2i') || path.includes('i2i') ? (
-                <>
-                  <option value="gemini-3.1-flash-image">Gemini 3.1 Flash — 迅速生图</option>
-                  <option value="gemini-3.0-pro-image">Gemini 3.0 Pro — 高质量生图</option>
-                  <option disabled>──── Grok ────</option>
-                  {path.includes('i2i') ? (
-                    <option value="grok-imagine-image-edit">Grok Imagine Edit — 图像编辑 (Super+)</option>
-                  ) : (
+              {(() => {
+                if (path.includes('t2i') || path.includes('i2i')) {
+                  return (
                     <>
-                      <option value="grok-imagine-image">Grok Imagine — 标准生图 (Super+)</option>
-                      <option value="grok-imagine-image-pro">Grok Imagine Pro — 高质量生图 (Super+)</option>
+                      <option value="gemini-3.1-flash-image">Gemini 3.1 Flash — 迅速生图</option>
+                      <option value="gemini-3.0-pro-image">Gemini 3.0 Pro — 高质量生图</option>
+                      <option disabled>──── Grok ────</option>
+                      {path.includes('i2i') ? (
+                        <option value="grok-imagine-image-edit">Grok Imagine Edit — 图像编辑 (Super+)</option>
+                      ) : (
+                        <>
+                          <option value="grok-imagine-image">Grok Imagine — 标准生图 (Super+)</option>
+                          <option value="grok-imagine-image-pro">Grok Imagine Pro — 高质量生图 (Super+)</option>
+                        </>
+                      )}
                     </>
-                  )}
-                </>
-              ) : (
-                <>
-                  <option value="veo_t2v_ultra">VEO 3.1 Ultra — 极速模式</option>
-                  <option value="veo_t2v_ultra_relaxed">VEO 3.1 Ultra Relax — 休闲模式</option>
-                  <option value="veo_t2v_lite">VEO 3.1 T2V Lite</option>
-                  <option disabled>──── Grok ────</option>
-                  <option value="grok-imagine-video-t2v">Grok Imagine Video — 文生视频 (Super+)</option>
-                </>
-              )}
+                  );
+                }
+                const kind = path.includes('i2v') ? 'i2v' : 't2v';
+                if (isHolo) {
+                  const orient = aspectToOrientation(aspectRatio);
+                  return (
+                    <>
+                      {VIDEO_MODELS.holo[kind][orient].map(o => (
+                        <option key={o.value} value={o.value}>{o.label}</option>
+                      ))}
+                      <option disabled>──── Grok ────</option>
+                      <option value={path.includes('i2v') ? 'grok-imagine-video-i2v' : 'grok-imagine-video-t2v'}>
+                        Grok Imagine Video (Super+)
+                      </option>
+                    </>
+                  );
+                }
+                // flow2api
+                return (
+                  <>
+                    {VIDEO_MODELS.flow2api[kind].portrait.map(o => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                    {kind === 't2v' && <option value="veo_t2v_lite">VEO 3.1 T2V Lite</option>}
+                    {kind === 'i2v' && <option value="veo_i2v_lite">VEO 3.1 I2V Lite — 首帧</option>}
+                    {kind === 'i2v' && <option value="veo_interpolation_lite">VEO 3.1 Interpolation Lite — 首尾帧</option>}
+                    <option disabled>──── Grok ────</option>
+                    <option value={kind === 'i2v' ? 'grok-imagine-video-i2v' : 'grok-imagine-video-t2v'}>
+                      Grok Imagine Video (Super+)
+                    </option>
+                  </>
+                );
+              })()}
             </select>
           </div>
 

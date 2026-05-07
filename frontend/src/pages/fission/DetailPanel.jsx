@@ -2,10 +2,13 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { AlertTriangle, Brain, Flame, Film, Clock, ChevronDown, Check, RefreshCw, Trash2 } from 'lucide-react';
 import api from '../../api/client';
 import useTaskStore from '../../stores/useTaskStore';
+import { useProvider } from '../../hooks/useProvider';
+import { getDefaultModel } from '../../constants/models';
 
 const SECTION_PAGE_SIZE = 20;
 
 export default function DetailPanel({ activeJobId }) {
+  const provider = useProvider();
   const taskProgressMap = useTaskStore((s) => s.taskProgressMap);
   const [chainGroups, setChainGroups] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -190,7 +193,7 @@ export default function DetailPanel({ activeJobId }) {
     setGeneratingVideo(true);
     const targetImages = images.filter(img => selectedImages.has(img.id));
     
-    let model = rootGroup.config_json?.videoModel || "veo_3_1_i2v_s_fast_portrait_ultra_relaxed";
+    let model = rootGroup.config_json?.videoModel || getDefaultModel(provider, 'fission_video');
     let grok_mode = undefined;
     let seconds = undefined;
 
@@ -227,7 +230,7 @@ export default function DetailPanel({ activeJobId }) {
     setExtendingVideo(true);
     const targetVids = videos.filter(vid => selectedVideos.has(vid.id));
 
-    let model = rootGroup.config_json?.videoModel || "veo_3_1_i2v_s_fast_portrait_ultra_relaxed";
+    let model = rootGroup.config_json?.videoModel || getDefaultModel(provider, 'fission_video');
     let grok_mode = undefined;
     let seconds = undefined;
 

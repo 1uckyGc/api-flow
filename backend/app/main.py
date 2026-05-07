@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.routers import auth, tasks, ws, upload, settings
-from app.routers import director, workflows
+from app.routers import director, workflows, config as config_router
 from app.config import settings as app_settings
 from app.database import engine, Base
 from fastapi.staticfiles import StaticFiles
@@ -58,6 +58,7 @@ app.include_router(ws.router)
 app.include_router(upload.router)
 app.include_router(director.router)
 app.include_router(workflows.router)
+app.include_router(config_router.router)
 
 
 # 挂载静态资源路由

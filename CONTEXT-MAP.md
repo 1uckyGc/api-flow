@@ -16,6 +16,7 @@
 - **模式名称** — *裂变（Fission）*、*导演模式（Director）*、*创意工坊（Workshop）*、*工具箱（Toolbox）*；中文是 UI 显示名，英文是代码标识符
 - **`config_json` 扩展字段** — 后端定义键，前端读写
 - **API 根路径** — `/api`（开发期 Vite 反代，生产期 Nginx）
+- **AI Provider** — `holo` / `flow2api`，`backend/.env` 的 `AI_PROVIDER` 设定，前端通过 `GET /api/config/ai-provider` 读。后端 `_generate_holo` vs `_generate_flow2api` 分发；前端 `useProvider()` 决定模型下拉与默认值（见 `frontend/src/constants/models.js`）。
 
 ## ADR
 

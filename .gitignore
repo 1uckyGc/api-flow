@@ -49,6 +49,11 @@ backend/*.sqlite3
 # 历史调试脚本生成的临时文件
 backend/tmp_*.json
 
+# HOLO 接入期间的调试产物（裸接口探针、模型表快照、烟测产物）
+backend/test_holo_*.py
+backend/smoke_test.*
+backend/holo_models.json
+
 # 误手在 Windows 资源管理器留下的"新建文件夹"垃圾目录
 backend/app/utils/新建文件夹/
 

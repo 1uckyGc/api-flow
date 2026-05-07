@@ -117,6 +117,7 @@ class DirectorCreateRequest(BaseModel):
     style: Optional[str] = None
     character_desc: Optional[str] = None
     model: str = "gemini-3.1-flash-image-portrait"
+    # 默认值是 flow2api 旧别名；HOLO 模式由 ai_service.LEGACY_MODEL_ALIASES 自动翻译为 veo_3_1_i2v_lite_portrait
     video_model: str = "veo_3_1_i2v_s_fast_portrait_ultra_relaxed"
 
 class DirectorConfirmRequest(BaseModel):
@@ -124,6 +125,7 @@ class DirectorConfirmRequest(BaseModel):
 
 class DirectorVideoRequest(BaseModel):
     """导演模式 Phase 2：分镜图 → 视频序列"""
+    # 默认值是 flow2api 旧别名；HOLO 模式由 ai_service.LEGACY_MODEL_ALIASES 自动翻译为 veo_3_1_i2v_lite_portrait
     video_model: str = "veo_3_1_i2v_s_fast_portrait_ultra_relaxed"
     task_ids: Optional[List[str]] = None  # None 表示处理全量成功帧
     video_prompts: Optional[dict] = None  # form: {"task_id": "user prompt"}

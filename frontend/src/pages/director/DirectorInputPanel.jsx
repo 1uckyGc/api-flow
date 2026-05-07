@@ -1,6 +1,8 @@
 import React, { useState, useRef } from 'react';
 import { Upload, X, Sparkles, RotateCcw, ChevronDown, ChevronUp } from 'lucide-react';
 import api from '../../api/client';
+import { useProvider } from '../../hooks/useProvider';
+import { VIDEO_MODELS, getDefaultModel } from '../../constants/models';
 
 const inputStyle = {
   background: 'var(--surface-0)',
@@ -11,6 +13,8 @@ const labelStyle = { color: 'var(--text-secondary)' };
 const hintStyle = { color: 'var(--text-tertiary)' };
 
 export default function DirectorInputPanel({ onSubmit, submitting, initialData }) {
+  const provider = useProvider();
+  const isHolo = provider === 'holo';
   const initModelFull = initialData?.config_json?.model || 'gemini-3.1-flash-image-portrait';
   const initModelBase = initModelFull.replace(/-2k$/, '').replace(/-4k$/, '');
   const initRes = initModelFull.endsWith('-4k') ? '4k' : (initModelFull.endsWith('-2k') ? '2k' : 'standard');
@@ -22,7 +26,9 @@ export default function DirectorInputPanel({ onSubmit, submitting, initialData }
   const [characterDesc, setCharacterDesc] = useState(initialData?.config_json?.character_desc || '');
   const [model, setModel] = useState(initModelBase);
   const [resolution, setResolution] = useState(initRes);
-  const [videoModel, setVideoModel] = useState(initialData?.config_json?.videoModel || 'veo_3_1_i2v_s_fast_portrait_ultra_relaxed');
+  const [videoModel, setVideoModel] = useState(
+    initialData?.config_json?.videoModel || getDefaultModel(provider, 'director_video')
+  );
   const [showAdvanced, setShowAdvanced] = useState(!!(initialData?.config_json?.style || initialData?.config_json?.character_desc));
   const [uploading, setUploading] = useState(false);
   const productInputRef = useRef(null);
@@ -226,12 +232,25 @@ export default function DirectorInputPanel({ onSubmit, submitting, initialData }
               className="w-full rounded-lg px-2.5 py-2 text-xs cursor-pointer focus:outline-none transition-all"
               style={inputStyle}
             >
-              <option value="veo_3_1_i2v_s_fast_portrait_ultra_relaxed">Veo 3.1 Relax（竖屏）</option>
-              <option value="veo_3_1_i2v_s_fast_ultra_relaxed">Veo 3.1 Relax（横屏）</option>
-              <option value="veo_3_1_i2v_s_fast_portrait_ultra_fl">Veo 3.1 Fast（竖屏）</option>
-              <option value="veo_3_1_i2v_s_fast_ultra_fl">Veo 3.1 Fast（横屏）</option>
-              <option value="veo_3_1_i2v_lite_portrait">Veo 3.1 I2V Lite（竖屏）</option>
-              <option value="veo_3_1_i2v_lite_landscape">Veo 3.1 I2V Lite（横屏）</option>
+              {isHolo ? (
+                <>
+                  {VIDEO_MODELS.holo.i2v.portrait.map(o => (
+                    <option key={o.value} value={o.value}>{o.label}（竖）</option>
+                  ))}
+                  {VIDEO_MODELS.holo.i2v.landscape.map(o => (
+                    <option key={o.value} value={o.value}>{o.label}（横）</option>
+                  ))}
+                </>
+              ) : (
+                <>
+                  <option value="veo_3_1_i2v_s_fast_portrait_ultra_relaxed">Veo 3.1 Relax（竖屏）</option>
+                  <option value="veo_3_1_i2v_s_fast_ultra_relaxed">Veo 3.1 Relax（横屏）</option>
+                  <option value="veo_3_1_i2v_s_fast_portrait_ultra_fl">Veo 3.1 Fast（竖屏）</option>
+                  <option value="veo_3_1_i2v_s_fast_ultra_fl">Veo 3.1 Fast（横屏）</option>
+                  <option value="veo_3_1_i2v_lite_portrait">Veo 3.1 I2V Lite（竖屏）</option>
+                  <option value="veo_3_1_i2v_lite_landscape">Veo 3.1 I2V Lite（横屏）</option>
+                </>
+              )}
             </select>
           </div>
 
