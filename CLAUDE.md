@@ -110,6 +110,8 @@ alembic upgrade head
 - **导演模式是锚点优先。** 第 0 帧串行先生成，后续所有帧都拿第 0 帧当参考图，靠这种方式锁人物 / 场景一致性。见 `backend/app/workers/director_worker.py`。
 - **导演模式有人工复核闸。** 剧本解析完后，group 状态翻成 `NEEDS_REVIEW`，worker 主动退出。前端收集用户编辑后调 `/api/director/confirm-scenes`，worker 从 Phase 2 续跑。
 - **httpx client 每 task 自管，AIClient 不再缓存共享池**。`_generate_holo` / `_generate_flow2api` 入口 `client = httpx.AsyncClient(...)` + 末尾 `finally aclose`。**绝对不要再加 `self._http_pool`**：celery threads 池下 100 thread 各有自己的 loop，共享池被多 thread 检测 loop drift 互相 aclose → "Cannot send a request, as the client has been closed"。每 task 多一次 TLS handshake (~100ms) 换零 race，对 30-60s 视频任务忽略不计。grok_client 一直是 async with 模式，不受影响。
+- **所有视频/图片下载必须流式，绝不用 `dl.content`**。`ai_service.py::stream_download_to_file(client, url, ext, ...)` 是共享助手 — `client.stream("GET", url)` + `aiter_bytes(64KB)` 逐块写到 `outputs/<uuid>.<ext>`，峰值内存 64KB / task。**绝对不要再用 `dl = await client.get(url); raw = dl.content`** —— 50MB mp4 整段进内存，100 并发 = 5GB 瞬时内存 = OOM 杀 worker（实测踩过）。所有三 provider 都用这个助手：HOLO `_generate_holo` 第 3 步、Grok `generate_video` / `generate_image` / `generate_image_edit`、Flow2API `_generate_flow2api` URL 下载段。失败时 helper 自己清 partial 文件，re-raise 给 caller。
+- **GenerationResult.output_file_path > result.data**。流式落盘后 `result.output_file_path` 是 outputs/ 下的相对路径，`result.data` 留空。`workers/tasks.py` save 逻辑优先 `output_file_path`（HOLO/Grok/Flow2API URL 下载都走这个），fallback `result.data`（Flow2API 内嵌 base64 图片走这个，少量 5-10MB 可接受）。新代码必须遵守这个约定，避免 50MB+ bytes 在 worker 内存里堆。
 - **API 限流就一个入口**：`utils/scheduler.py::wait_for_api_slot`。所有图像、视频上游调用都过这里。
 - **视频延展走尾帧接力**：`extract_last_frame_base64_sync` 用 `ffmpeg -sseof -0.1` 抓视频最后一帧，base64 喂回模型作为下一段的种子。
 - **三 provider 按模型名分发，不再有"全局开关"**。`services/model_registry.py::resolve_provider(model)` 是路由权威：
