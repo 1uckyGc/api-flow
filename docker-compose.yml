@@ -41,6 +41,10 @@ services:
       - /app/__pycache__
       - /app/.pytest_cache
       - outputs_data:/app/outputs
+      # 共享 worker 的 dreamina OAuth token 卷 — /api/logs/providers 端点
+      # 要在 backend 进程里跑 dreamina user_credit 子进程查余额。两边都要 RW
+      # 因为 dreamina 偶发会刷新 token（refresh_token 重写）
+      - dreamina_token:/root/.local/share/dreamina
 
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-followmeeeaigc}:${POSTGRES_PASSWORD:-followmeeeaigc_pass}@db:5432/${POSTGRES_DB:-followmeeeaigc_db}
