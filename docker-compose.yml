@@ -70,7 +70,10 @@ services:
       - /app/__pycache__
       - /app/.pytest_cache
       - outputs_data:/app/outputs
-      # 即梦/Dreamina CLI 登录态持久化（OAuth Device Flow 一次性扫码后会话保存在这里）
+      # 即梦/Dreamina CLI 登录态持久化
+      # 注意：dreamina v1.4.x 把 OAuth token 写在 /root/.local/share/dreamina/byted_cli_user_token.json，
+      # 把任务历史 / 日志 写在 /root/.dreamina_cli/。两个目录都要挂卷才能跨容器重建保留登录态。
+      - dreamina_token:/root/.local/share/dreamina
       - dreamina_session:/root/.dreamina_cli
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-followmeeeaigc}:${POSTGRES_PASSWORD:-followmeeeaigc_pass}@db:5432/${POSTGRES_DB:-followmeeeaigc_db}
@@ -99,4 +102,5 @@ volumes:
   postgres_data:
   redis_data:
   outputs_data:
-  dreamina_session:
+  dreamina_session:    # /root/.dreamina_cli — tasks.db / logs
+  dreamina_token:      # /root/.local/share/dreamina — OAuth token（关键）
