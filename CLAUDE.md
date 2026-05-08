@@ -52,7 +52,7 @@ frontend/                   Vite + React 单页应用
     components/             Layout / Inbox / Gallery / Settings / Studio / TaskCreate / Toolbox / Utility
     constants/models.js     前端模型注册表（与后端 model_registry.py 对齐 + providerOf() 前缀检测）
     stores/                 Zustand store — auth / settings / task / theme / workshop
-docker-compose.yml          5 服务编排（worker 命令带 -B 启用 celery beat）
+docker-compose.yml          5 服务编排（worker 命令: --beat 启用 celery beat、--pool=threads 启用线程池、-c ${MAX_CONCURRENT_TASKS:-50}）
 ```
 
 ## 模式地图
@@ -134,6 +134,16 @@ alembic upgrade head
   - **本地注册已禁用**：`POST /api/auth/register` 返回 410 Gone，账户统一在 https://followmeee.co/manage 管理。
   - **`is_admin` 判定**：`extract_is_admin(upstream)` 兼容多种 shape (`user.is_admin` / `user.role==admin` / 顶层 `is_admin`)；followmeee.co 实际响应字段如有变化，改这一个函数即可。
 - **docker-compose `env_file` 会对 `$` 做变量插值**。bcrypt hash 里的 `$2b$12$...` 必须在 `.env` 写成 `$$2b$$12$$...`（双写转义），否则 `$abc` 会被当作未设变量替换为空，hash 被破坏。同样适用任何含 `$` 的密码/token。
+- **Celery worker 用 `--pool=threads` 不是 prefork**。HOLO/Flow2API 调用是纯 IO-bound（HTTP 等待），prefork 模式每个 worker 是独立 Python 进程，~80MB baseline，c=100 直接吃 8GB → OOM；threads 池 1 进程 + N 线程，c=100 仅 ~80MB 总占用。现状已切 threads + `MAX_CONCURRENT_TASKS=100`（远程 154.53.75.37 实测稳定）。
+  - 配套：`backend/app/database.py` `create_engine(... pool_size=30, max_overflow=20, pool_pre_ping=True, pool_recycle=300)` — 默认 5+10 不够 100 threads 同时拉连接，会 QueuePool overflow
+  - threads 池不支持 `--max-memory-per-child`，用 `--max-tasks-per-child=200` 替代（每 worker 处理 200 任务后自动回收）
+  - 项目 globals 全部已是 per-loop 隔离（`AIClient._get_client` / `grok_client._get_client` / `_redis_client`），threads 共享内存安全；**未来加 module-level mutable state 必须考虑线程竞态**
+- **速率锁按 provider 拆桶，HOLO 不再有本地锁**。`ai_service.py::generate()` 现状：
+  - HOLO：跳过 `wait_for_api_slot`（HOLO `/v1/generate` 上游 85 generators 自管排队）
+  - Flow2API：`wait_for_api_slot(api_type="flow2api", interval_base=5)` — 自托管易触验证码，5s 一个 slot 严格串行
+  - Grok：`wait_for_api_slot(api_type="grok", interval_base=1)` — 在 `grok_client.py` 内调
+  - 之前共享 `gemini_veo` slot + 10s 间隔，把 HOLO 锁成 1 task/10s（每小时上限 360）；现在 HOLO 真并发 = `MAX_CONCURRENT_TASKS`
+- **服务器内存上限定 worker 并发**。154.53.75.37 是 4GB 机器、无 swap，threads pool c=100 实测 ~80MB worker 内存；prefork c=100 实测必然 OOM（8GB 需求）。**别动 prefork 的 concurrency 高于 20**，要更高用 threads。x-ui / xray VLESS 也跑在同一台机器上，OOM 会让 VLESS 转发挂掉（曾踩过）。
 - **静态挂载 30 天 immutable 缓存**。`/outputs` 和 `/uploads` 路径走 `add_cache_headers` 中间件，文件名是 UUID 所以这样安全。
 - **Toolbox 下拉的真正实现是 `Utility/ToolPanel.jsx`**（不是 `Toolbox/Toolbox.jsx`）。`/t2i /i2i /t2v /i2v` 全部走 ToolPanel 的硬编码 option 列表 + 三 provider optgroup 分组渲染。改下拉**只改 ToolPanel.jsx**。
 - **Windows + Docker Desktop rebuild 前端时的两个坑**：
