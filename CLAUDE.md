@@ -9,7 +9,7 @@
 | **后端** | Python 3.10 · FastAPI · SQLAlchemy 2 · Alembic · Celery 5 |
 | **前端** | React 18 · Vite 5 · Zustand · TailwindCSS · React Router 6 |
 | **存储** | PostgreSQL 15（关系数据） · Redis 7（broker + result backend） |
-| **AI 网关** | **三家并存按模型名分发**：HOLO（`api.dealonhorizon.us`，异步轮询）、Flow2API（`followmeee.co`，OpenAI 兼容 SSE）、Grok2API（`grok-imagine-*`，多端点）。`AI_PROVIDER` 仅作未命中模型时的兜底；DeepSeek 做提示词扩写 |
+| **AI 网关** | **多家并存按模型名分发**：HOLO（`api.dealonhorizon.us`，异步轮询）、Flow2API（`followmeee.co`，OpenAI 兼容 SSE）、Grok2API（`grok-imagine-*`，多端点）、**PackyAPI**（`packyapi.com`，Gemini OpenAI 形态，仅复刻视频 LLM 用）、**Dreamina CLI**（即梦 v1.4.x，subprocess，复刻视频产线 B 用）。`AI_PROVIDER` 仅作未命中模型时的兜底；DeepSeek 做提示词扩写 |
 | **实时通信** | WebSocket（按用户分发，见 `backend/app/routers/ws.py`） |
 | **容器** | docker-compose，5 个服务（db / redis / backend / worker / frontend） |
 
@@ -33,28 +33,41 @@ backend/                    FastAPI 应用 + Celery worker
       dispatcher.py         **worker 唯一入口** — dispatch_generate()，按 provider 分发 + 调用日志埋点
       call_logger.py        record_api_call / complete_api_call (短事务，不依赖外部 db)
       followmeee_auth.py    集中身份代理：verify_via_followmeee() 调 followmeee.co/api/login + extract_is_admin/display_name
+      packy_gemini.py       PackyAPI Gemini OpenAI-shape 客户端 — 复刻视频 LLM 自动模式（视频靠 image_url + data:video/mp4 inline 喂）
+      dreamina_client.py    即梦 CLI subprocess 包装 — image2video submit + 轮询 + --download_dir → outputs/<uuid>.mp4
+      storyboard/           复刻视频引擎（vendor 自 storyboard_engine_v3）
+        pipeline.py         render_master_prompt / parse_llm_output (含 (B9) + ===CLI_PAYLOAD=== 解析) / save_gus_to_dir
+        prompts/01_master_prompt.md  6 阶段 LLM 主提示词（{{BRAND_CONFIG_BLOCK}} 注入点 + (B9) JSON + CLI_PAYLOAD 汇总）
+    routers/
+      replicate.py          /api/replicate/* 7 端点：jobs CRUD + llm-output + gus + generate-image / generate-video
     workers/                Celery 任务
       tasks.py              process_generation 主入口
       director_worker.py    导演模式（锚点 → 并行帧）
       workflow_worker.py    创意工坊运行实例
+      replicate_tasks.py    复刻视频两个 Celery 任务：
+                              run_storyboard_llm (PackyAPI Gemini 跑 6 阶段 LLM)
+                              run_video_via_dreamina (即梦 CLI 出 seedance2.0fast 视频)
       cleanup_tasks.py      celery beat 两个清理任务：
                               03:30 purge_old_logs (30 天 ApiCallLog 行)
-                              04:00 purge_old_artifacts (3 天 task_groups + 文件 + 前端记录)
+                              04:00 purge_old_artifacts (3 天 task_groups + 文件 + 前端记录 + replicate workdir rmtree)
       celery_app.py         Celery 工厂 + beat schedule
     prompts.py              提示词模板中心（LLM + 图像）
     utils/                  scheduler（限流）/ file_cleanup / logger
-  alembic/                  数据库迁移（head: b7c91e2f4d10_add_api_call_log）
+  alembic/                  数据库迁移（head: c8d4e9f2a1b3_add_storyboard_replicate_enums）
   uploads/                  用户上传（挂载在 /uploads）
   outputs/                  AI 生成结果（挂载在 /outputs）
 frontend/                   Vite + React 单页应用
   src/
     App.jsx                 路由表；除 /login 外全部 token 鉴权
     api/                    axios 实例 + 各业务 endpoint 客户端（client.js / logs.js / ...）
-    pages/                  顶层工作区 — fission / director / workshop / FissionWorkspace / Logs（调用日志页）
+    pages/                  顶层工作区 — fission / director / workshop / FissionWorkspace / Logs / replicate（复刻视频）
+    pages/replicate/        ReplicatePage（壳）/ InputForm / AwaitingLLMOutput / GUList（双产线卡片+JSON 复制按钮）
     components/             Layout / Inbox / Gallery / Settings / Studio / TaskCreate / Toolbox / Utility
     constants/models.js     前端模型注册表（与后端 model_registry.py 对齐 + providerOf() 前缀检测）
     stores/                 Zustand store — auth / settings / task / theme / workshop
-docker-compose.yml          5 服务编排（worker 命令: --beat 启用 celery beat、--pool=threads 启用线程池、-c ${MAX_CONCURRENT_TASKS:-50}）
+docker-compose.yml          5 服务编排：worker 命令 `--beat --pool=threads --max-tasks-per-child=200 -c ${MAX_CONCURRENT_TASKS:-50}`；
+                              worker 挂三个数据卷：outputs_data（共享出图）、dreamina_session（/root/.dreamina_cli — tasks.db / 日志）、
+                              dreamina_token（/root/.local/share/dreamina — OAuth token，关键）
 ```
 
 ## 模式地图
@@ -67,10 +80,12 @@ docker-compose.yml          5 服务编排（worker 命令: --beat 启用 celery
 | **导演模式（Director）** | `/director` | 剧本 → DeepSeek 拆 N 个分镜 → 锚点帧 → 并行剩余帧 → 可选批量出视频 |
 | **创意工坊（Workshop）** | `/workshop`、`/workshop/build`、`/workshop/run` | 用户自建多步工作流（模板 + 运行实例） |
 | **工具箱（Toolbox）** | `/t2i`、`/i2i`、`/t2v`、`/i2v` | 一次性的 文生图 / 图生图 / 文生视频 / 图生视频；下拉按 HOLO / Flow2API / Grok 三组分隔 |
+| **复刻视频（Replicate）** | `/replicate` | 上传样片 + 商品图 + 品牌表单 → Gemini 跑 6 阶段产 N 个 GU → 每 GU 双产线（A: HOLO `GPT-images2 1:1` 9 宫格；B: 即梦 `seedance2.0fast` 15s 视频）|
 | **资产库** | `/assets` | 全部生成结果的瀑布流画廊 |
 | **调用日志** | `/logs` | 双 Tab：本地 ApiCallLog（含扣费/HOLO_id/状态过滤） + 代理 HOLO `/me/transactions` 官方账单 |
 
-`backend/app/models/task.py::TaskSource` 是 8 种任务来源的唯一定义点（`TOOLBOX`、`GALLERY`、`PIPELINE`、`GALLERY_EXTEND`、`FISSION`、`DIRECTOR`、`DIRECTOR_VIDEO`、`STORYBOARD_FISSION`）。
+`backend/app/models/task.py::TaskSource` 是 9 种任务来源的唯一定义点（`TOOLBOX`、`GALLERY`、`PIPELINE`、`GALLERY_EXTEND`、`FISSION`、`DIRECTOR`、`DIRECTOR_VIDEO`、`STORYBOARD_FISSION`、`STORYBOARD`）。
+`GroupStatus` 加了 `AWAITING_LLM_INPUT`（手动模式等用户粘 LLM 输出）。
 
 ## 开发指令
 
@@ -116,9 +131,10 @@ alembic upgrade head
 - **GenerationResult.output_file_path > result.data**。流式落盘后 `result.output_file_path` 是 outputs/ 下的相对路径，`result.data` 留空。`workers/tasks.py` save 逻辑优先 `output_file_path`（HOLO/Grok/Flow2API URL 下载都走这个），fallback `result.data`（Flow2API 内嵌 base64 图片走这个，少量 5-10MB 可接受）。新代码必须遵守这个约定，避免 50MB+ bytes 在 worker 内存里堆。
 - **API 限流就一个入口**：`utils/scheduler.py::wait_for_api_slot`。所有图像、视频上游调用都过这里。
 - **视频延展走尾帧接力**：`extract_last_frame_base64_sync` 用 `ffmpeg -sseof -0.1` 抓视频最后一帧，base64 喂回模型作为下一段的种子。
-- **三 provider 按模型名分发，不再有"全局开关"**。`services/model_registry.py::resolve_provider(model)` 是路由权威：
-  - `grok-` 前缀 → grok；含 `_ultra` 关键字 → flow2api；`GPT-Images` / `gemini-3.` / `imagen-` / `veo_3_` 前缀 → holo；其他 → fallback (`AI_PROVIDER`)
+- **三 provider 按模型名分发，不再有"全局开关"**。`services/model_registry.py::resolve_provider(model)` 是路由权威（**case-insensitive** 比较，HOLO 模型名大小写不稳）：
+  - `grok-` 前缀 → grok；含 `_ultra` 关键字 → flow2api；`gpt-images` / `gemini-3.` / `imagen-` / `veo_3_` / `sora-` 前缀 → holo；其他 → fallback (`AI_PROVIDER`)
   - **显式前缀消歧**（最高优先级）：`flow2api/<model>` / `holo/<model>` / `grok/<model>` 用于 HOLO 与 Flow2API 同名模型（如 `gemini-3.1-flash-image-portrait`）。`_generate_*` 入口先 `strip_provider_prefix()` 再发给上游。
+- **HOLO 改名警告**：HOLO 把老的 `GPT-Images 2.0`（带空格、点、零）改成 `GPT-images2 X:Y[-2K|-4K]` 系列（小写 i、无空格、按比例分变体，如 `GPT-images2 1:1`、`GPT-images2 9:16-4K`）。任何硬编码模型名都要查 HOLO `/v1/models`。Storyboard 9 宫格图默认走 `GPT-images2 1:1`（方形）。`model_registry.py` 走 lowercase 前缀比较所以兼容老名，但 HOLO 上游会拒老名。
 - **dispatcher.py 是 worker 唯一入口**。`tasks.py` 和 `director_worker.py` 都调 `dispatch_generate(...)`，内部按 provider 分发到 `ai_client.generate_with_retry`（HOLO/Flow2API）或 `_run_grok`（含 grok 自带重试 + 视频延展尾帧抽取）。也是写 ApiCallLog 的唯一埋点位置。
 - **凭据全部 .env 系统级**（内部使用，不暴露 UI）。三套独立配置：`HOLO_API_URL/KEY` (`api.dealonhorizon.us`)、`FLOW2API_URL/KEY` (`https://followmeee.co`)、`GROK_API_URL/KEY` (`38.64.57.216:8001`)。`AI_API_URL/KEY` 是兼容兜底字段。`system_settings.veo_api_key/gemini_api_key` 是 dead column，不再读。
 - **模型名别名**：HOLO 不认 `*_ultra` / `*_ultra_relaxed` / `*_ultra_fl` 这些 Flow2API 时代命名。`ai_service.py::LEGACY_MODEL_ALIASES` 是兜底翻译表（旧名 → HOLO 实名，e.g. `_ultra_relaxed` → `lite`、`_ultra` → `fast`）。
@@ -148,10 +164,38 @@ alembic upgrade head
   - Grok：`wait_for_api_slot(api_type="grok", interval_base=1)` — 在 `grok_client.py` 内调
   - 之前共享 `gemini_veo` slot + 10s 间隔，把 HOLO 锁成 1 task/10s（每小时上限 360）；现在 HOLO 真并发 = `MAX_CONCURRENT_TASKS`
 - **服务器内存上限定 worker 并发**。154.53.75.37 是 4GB 机器、无 swap，threads pool c=100 实测 ~80MB worker 内存；prefork c=100 实测必然 OOM（8GB 需求）。**别动 prefork 的 concurrency 高于 20**，要更高用 threads。x-ui / xray VLESS 也跑在同一台机器上，OOM 会让 VLESS 转发挂掉（曾踩过）。
+- **复刻视频（/replicate）三段式流程**：
+  - **阶段 1 — LLM**：上传样片视频 + N 张商品图 + 品牌表单 → 渲染 `01_master_prompt.md`（注入 `{{BRAND_CONFIG_BLOCK}}`）。
+    - **自动模式（默认勾选）**：派 `run_storyboard_llm` Celery 任务调 PackyAPI Gemini → group.status 从 PROCESSING → COMPLETED；视频靠 `{type:image_url, image_url:{url:"data:video/mp4;base64,..."}}` 单条 POST 喂给 gemini-3-flash-preview，gateway 按 mime 路由到 Gemini 视频解码器（**OpenAI 形态 `/v1/chat/completions`，不是 Gemini `/v1beta/`，PackyAPI Gemini 分组 key 走这条**）
+    - **手动模式（不勾）**：group.status=`AWAITING_LLM_INPUT`，前端展示主提示词 + 复制按钮 + 粘贴框，用户拿到 ChatGPT/Gemini 网页跑完后粘回来，调 `/api/replicate/jobs/{id}/llm-output` 解析
+  - **阶段 2 — 解析**：`storyboard/pipeline.py::parse_llm_output(text)` 拆 N 个 GU。每个 GU 抽 `pipeline_a_image` / `pipeline_b_video`（Markdown 文本）+ `cli_payload`（机读 JSON）。**双输出模板（v3.1）**：每 GU 内嵌 `(B9) DREAMINA_CLI_JSON` 块（` ```json {gu_id, model_version, duration, video_resolution, ratio, prompt} ``` `），末尾再 `===CLI_PAYLOAD=== ... ===CLI_PAYLOAD_END===` 包裹一个 GU 数组的汇总。**汇总 trumps inline**（汇总更不易被 LLM 偷漏字段）；inline 缺失时用汇总，summary 缺失时用 inline，都缺 → cli_payload=None（前端 graceful 退化，Dreamina 任务用 prompt_b_video 文本兜底）。
+  - **阶段 3 — 双产线触发**：每个 GU 卡片两个按钮：
+    - **产线 A · 9 宫格图** → `POST /api/replicate/jobs/{id}/gus/{gu_id}/generate-image`，新建 `Task(group_id=storyboard, kind=image, model=GPT-images2 1:1)` → `process_generation` → HOLO 出图。LLM 产的 prompt 自带"3×3 grid of 9 panels with timestamps"描述，所以方图就是 9 宫格。
+    - **产线 B · 15s 视频** → `POST /api/replicate/jobs/{id}/gus/{gu_id}/generate-video`，新建 `Task(provider=dreamina, model_version=seedance2.0fast)` → `run_video_via_dreamina` Celery 任务 → subprocess `dreamina image2video` → 轮询 `query_result` → `--download_dir` 下载 mp4 → `move_to_outputs()` 重命名到 `outputs/<uuid>.mp4`。优先用 (B9) cli_payload 里的 model_version/duration/prompt，请求里显式传的字段覆盖。
+  - **GenerateVideoRequest** 不再走 `dispatch_generate`（HOLO/Flow2API/Grok 路由），是独立的 Dreamina subprocess 路径。
+- **execute_generation_task task.config_json 优先 group.config_json**。Storyboard 一组里图+视频混跑（产线 A 用 HOLO `GPT-images2 1:1`，产线 B 用 即梦 `seedance2.0fast`），需要"一组多 model"。`backend/app/workers/tasks.py` 已改为：`task_cfg = task.config_json or {}; merged_cfg = {**(group.config_json or {}), **task_cfg}; model = task_cfg.get("model") or group.config_json.get("model", default)`。向后兼容（老 group.config_json.model 仍生效），同时让 storyboard 子任务能各自带模型。
+- **PackyAPI Gemini auto mode 关键事实**：
+  - key（`PACKYAPI_GEMINI_KEY` in `.env`）必须绑 PackyAPI 的 **gemini 分组**（非 codex / sora 分组）；否则模型列表只看到 codex / sora-2 等。前端 InputForm 已放 5 个 Gemini 模型选项（`gemini-3-flash-preview` 默认启用，其他 4 个 disabled 占位等通道开通）
+  - **走 `/v1/chat/completions`，不走 `/v1beta/.../generateContent`**。该 key 只开 OpenAI 形态，Gemini 原生形态网关返 503 / connection reset
+  - 视频输入：把 mp4 base64 inline 进 `{type:image_url, image_url:{url:"data:video/mp4;base64,..."}}`。**只有这种 type 被 gateway 接受**；`input_video` / `video_url` / `input_image` 都被静默丢弃（prompt_tokens 暴跌即可判断 dropping）
+  - 模型自带 thinking，`reasoning_tokens` 占完成 tokens 50-80%。`max_tokens` 至少 8000，6 阶段任务建议 32000
+  - Token 估算：3s 128×128 视频 ≈ 218 prompt tokens；60s 720p 估算 ≈ 5k tokens；含主提示词整次调用约 10-15k tokens
+- **Dreamina CLI（即梦 v1.4.x）部署关键事实**：
+  - 二进制 baked into worker Dockerfile：`RUN curl -sL https://jimeng.jianying.com/cli | bash` 装到 `/root/.local/bin/dreamina` + `ENV PATH`
+  - **登录态分两个目录**（**两个都要挂 docker volume，否则 force-recreate 会丢登录态**）：
+    - `/root/.local/share/dreamina/byted_cli_user_token.json`（**OAuth token，关键**） → 卷 `dreamina_token`
+    - `/root/.dreamina_cli/`（tasks.db / 日志 / SKILL.md，辅助） → 卷 `dreamina_session`
+  - **首次部署后必须 SSH 进容器一次性扫码登录**：`docker exec -it followmeeeaigc_worker /root/.local/bin/dreamina login`，CLI 打印 verification_uri + user_code，抖音 App 扫码授权（device_code 5-10 min 内必须扫，过期会"数据不存在"，用 `dreamina relogin` 重来）
+  - **OAuth Device Flow，不是 QR 扫码** —— 标题虽然说扫码，实际是抖音 App 输入 user_code 确认，授权完 token 自动写盘
+  - 模型走 `multimodal2video`（支持 seedance2.0 全家族）或 `image2video`（取一图当首帧；storyboard 用这个）。模型名 `seedance2.0` / `seedance2.0fast` / `seedance2.0_vip` / `seedance2.0fast_vip`（无空格无连字符）
+  - **队列等待是常态**：seedance2.0fast 高峰 queue_idx 200+，等 5-10 分钟很正常。dreamina_client 默认 `max_wait_sec=1800`（20 min）+ `poll_interval=15s` + 自动 log queue_idx 变化
+  - 异步：`image2video --poll=0` 立即返 submit_id 不阻塞；后续 `query_result --submit_id=<id>` 轮 status，success 后再 `query_result --submit_id=<id> --download_dir=<dir>` 才下载本地 mp4
+  - 单次成本：4s 720p ≈ 8 credits、15s 720p 估算 ≈ 30 credits（Maestro VIP 账户 14k+ credits）
 - **静态挂载 30 天 immutable 缓存**。`/outputs` 和 `/uploads` 路径走 `add_cache_headers` 中间件，文件名是 UUID 所以这样安全。
 - **3 天滚动清理 task_groups + 文件 + 前端记录**。`workers/cleanup_tasks.py::purge_old_artifacts` 每天 04:00 跑：
   - 删 `created_at < now - 3d` 的 task_groups（cascade 级联删 sub tasks）
   - 物理删 `task.output_file` / `output_thumbnail` / `input_files` / `task_group.config_json["anchor_file"]`
+  - **复刻视频整目录清**：`source == STORYBOARD` 的 group 还会 `shutil.rmtree("uploads/replicate/<id>")`（双 resolve 防 .. 越界），把 master_prompt / sample 视频 / GU 文本 / 下载 mp4 一并清掉
   - **保护规则（A1）**：任何 sub task `status == RUNNING` 的 group 永远不删；`QUEUED / RETRY` 超 3 天视为僵尸一并删
   - **导演 NEEDS_REVIEW（B2）**：跟成功任务一样 3 天清（不给宽限）
   - **fission 父子链（C1）**：整链一起删，自引用 `fission_parent_id` 反向引用先置 NULL 解 FK
