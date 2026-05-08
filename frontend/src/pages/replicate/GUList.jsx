@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Copy, CheckCheck, ImageIcon, Film, Loader2 } from 'lucide-react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Copy, CheckCheck, ImageIcon, Film, Loader2, Settings } from 'lucide-react';
 import { listGUs, generateImage, generateVideo } from '../../api/replicate';
 
 const STATUS_LABEL = {
@@ -10,10 +10,32 @@ const STATUS_LABEL = {
   retry: '重试',
 };
 
+// 4 个 seedance 模型 + 老 3.0 系列。VIP 变体支持 1080p 且队列优先级更高
+const VIDEO_MODELS = [
+  { value: 'seedance2.0fast', label: 'seedance 2.0 fast · 默认 (720p)', vip: false },
+  { value: 'seedance2.0fast_vip', label: 'seedance 2.0 fast · VIP (720p / 1080p)', vip: true },
+  { value: 'seedance2.0', label: 'seedance 2.0 标准 (720p)', vip: false },
+  { value: 'seedance2.0_vip', label: 'seedance 2.0 · VIP (720p / 1080p)', vip: true },
+];
+
+const VIDEO_RESOLUTIONS = [
+  { value: '720p', label: '720p' },
+  { value: '1080p', label: '1080p（仅 VIP）' },
+];
+
 export default function GUList({ job, onChange }) {
   const [gus, setGUs] = useState([]);
   const [loading, setLoading] = useState(false);
   const pollRef = useRef(null);
+  const [videoModel, setVideoModel] = useState('seedance2.0fast');
+  const [videoResolution, setVideoResolution] = useState('720p');
+
+  const isVip = useMemo(() => videoModel.includes('vip'), [videoModel]);
+
+  // 模型切到非 VIP 时自动把分辨率打回 720p（避免提交 1080p 被后端 guard 强制改）
+  useEffect(() => {
+    if (!isVip && videoResolution !== '720p') setVideoResolution('720p');
+  }, [isVip, videoResolution]);
 
   const fetchList = useCallback(async () => {
     if (!job?.id) return;
@@ -59,10 +81,13 @@ export default function GUList({ job, onChange }) {
   };
 
   const triggerVideo = async (guId, gu) => {
-    // 后端默认会用 GU 的 (B9) cli_payload，前端不需要传额外字段；
-    // 如果 LLM 没产 cli_payload，传 model_version 兜底。
-    const payload = {};
-    if (!gu?.cli_payload) payload.model_version = 'seedance2.0fast';
+    // 用户在顶部选了模型和分辨率 → 这两个总是覆盖 cli_payload；
+    // duration 沿用 cli_payload (B-json 给的)；后端服务端 guard 会再校验
+    // model 与 resolution 兼容（非 vip 强制 720p）。
+    const payload = {
+      model_version: videoModel,
+      video_resolution: videoResolution,
+    };
     try {
       await generateVideo(job.id, guId, payload);
       fetchList();
@@ -90,12 +115,62 @@ export default function GUList({ job, onChange }) {
         </button>
       </div>
 
+      {/* 视频生成工具栏：全局选 model + resolution，影响所有「一键出视频」按钮 */}
+      <div
+        className="px-8 py-3 border-b flex items-center gap-3 flex-wrap"
+        style={{ borderColor: 'var(--border-subtle)', background: 'var(--surface-1)' }}
+      >
+        <div className="flex items-center gap-1.5 text-xs" style={{ color: 'var(--text-tertiary)' }}>
+          <Settings size={12} />
+          产线 B 视频参数
+        </div>
+
+        <select
+          value={videoModel}
+          onChange={e => setVideoModel(e.target.value)}
+          className="px-3 py-1.5 rounded-md text-xs outline-none"
+          style={{ background: 'var(--surface-2)', border: '1px solid var(--border-default)', color: 'var(--text-primary)' }}
+          title="即梦 image2video 模型版本"
+        >
+          {VIDEO_MODELS.map(m => (
+            <option key={m.value} value={m.value}>{m.label}</option>
+          ))}
+        </select>
+
+        <select
+          value={videoResolution}
+          onChange={e => setVideoResolution(e.target.value)}
+          className="px-3 py-1.5 rounded-md text-xs outline-none"
+          style={{
+            background: 'var(--surface-2)',
+            border: '1px solid var(--border-default)',
+            color: 'var(--text-primary)',
+            opacity: isVip ? 1 : 0.6,
+          }}
+          title={isVip ? '分辨率（VIP 模型支持 1080p）' : '非 VIP 模型仅支持 720p'}
+        >
+          {VIDEO_RESOLUTIONS.map(r => (
+            <option key={r.value} value={r.value} disabled={!isVip && r.value !== '720p'}>
+              {r.label}
+            </option>
+          ))}
+        </select>
+
+        <span className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>
+          {isVip
+            ? '✓ VIP 通道：可选 1080p，队列更靠前，credits 消耗更高'
+            : '提示：要 1080p / 队列优先级，选 VIP 模型'}
+        </span>
+      </div>
+
       <div className="flex-1 overflow-auto px-8 py-6">
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {gus.map(gu => (
             <GUCard
               key={gu.gu_id}
               gu={gu}
+              videoModel={videoModel}
+              videoResolution={videoResolution}
               onGenerateImage={() => triggerImage(gu.gu_id)}
               onGenerateVideo={() => triggerVideo(gu.gu_id, gu)}
             />
@@ -111,7 +186,13 @@ export default function GUList({ job, onChange }) {
   );
 }
 
-function GUCard({ gu, onGenerateImage, onGenerateVideo }) {
+function GUCard({ gu, videoModel, videoResolution, onGenerateImage, onGenerateVideo }) {
+  // 把模型名简化展示：seedance2.0fast_vip → "fast · VIP"
+  const modelLabel = videoModel
+    .replace('seedance2.0', '')
+    .replace(/^_/, '')
+    .replace('_vip', ' · VIP') || '标准';
+
   return (
     <div className="rounded-xl overflow-hidden" style={{ background: 'var(--surface-1)', border: '1px solid var(--border-subtle)' }}>
       <div className="flex items-center justify-between px-4 py-2.5 border-b" style={{ borderColor: 'var(--border-subtle)' }}>
@@ -128,10 +209,10 @@ function GUCard({ gu, onGenerateImage, onGenerateVideo }) {
           onGenerate={onGenerateImage}
           mediaType="image"
         />
-        {/* 产线 B — Dreamina seedance2.0 fast */}
+        {/* 产线 B — Dreamina seedance2.0（按顶部工具栏选择） */}
         <PipelineColumn
           icon={<Film size={14} />}
-          label="产线 B · 15秒视频（即梦 seedance2.0 fast）"
+          label={`产线 B · 15秒视频（即梦 seedance2.0 ${modelLabel} · ${videoResolution}）`}
           prompt={gu.pipeline_b_video}
           taskState={gu.video_task}
           onGenerate={onGenerateVideo}
