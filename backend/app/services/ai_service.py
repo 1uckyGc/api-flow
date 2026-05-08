@@ -14,13 +14,16 @@ from app.config import settings
 from app.utils.logger import logger
 
 class GenerationResult:
-    def __init__(self, success: bool=False, media_type: str="", data: bytes=b"", mime_type: str="", error: str="", file_ext: str=""):
+    def __init__(self, success: bool=False, media_type: str="", data: bytes=b"", mime_type: str="", error: str="", file_ext: str="", output_file_path: str=""):
         self.success = success
         self.media_type = media_type
+        # data 是历史字段：caller 自己写盘。新代码（HOLO 流式下载）直接落盘 outputs/<uuid>.<ext>
+        # 然后 set output_file_path，data 留空避免 50MB 视频在内存里占着。
         self.data = data
         self.mime_type = mime_type
         self.error = error
         self.file_ext = file_ext
+        self.output_file_path = output_file_path  # 优先于 data；caller 检查这个字段决定是否还需自己写盘
 
 # 老 Flow2API 时代的视频模型别名 → HOLO 真实模型名
 # 映射策略：_ultra_relaxed → Lite 档（最便宜 720p），_ultra/_ultra_fl → Fast 档（中等 720p）
@@ -358,37 +361,70 @@ class AIClient:
                 result.error = "已 completed 但缺少 file_url"
                 return result
 
-            # --- 3. DOWNLOAD ---
+            # --- 3. DOWNLOAD (流式下载，避免视频整段进内存导致 OOM) ---
             if progress_callback:
                 await progress_callback("正在下载结果...")
             full_url = file_url if file_url.startswith("http") else f"{base_url}{file_url}"
+
+            # 提前定下落盘扩展名（HOLO 总是返回 file_ext，无需嗅探）
+            if file_ext_hint:
+                ext = file_ext_hint if file_ext_hint.startswith(".") else f".{file_ext_hint}"
+                ext_low = ext.lower()
+            else:
+                # 兜底：HOLO 偶尔不给 hint 时，按 is_video 推
+                ext_low = ".mp4" if is_video else ".png"
+            mime_map = {
+                ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".webp": "image/webp", ".mp4": "video/mp4",
+            }
+
+            import uuid as _uuid
+            output_filename = f"{_uuid.uuid4().hex}{ext_low}"
+            output_filepath = os.path.join("outputs", output_filename)
+            os.makedirs("outputs", exist_ok=True)
+
             for dl_attempt in range(3):
+                bytes_written = 0
                 try:
-                    dl = await client.get(
-                        full_url, headers=headers,
+                    async with client.stream(
+                        "GET", full_url, headers=headers,
                         timeout=httpx.Timeout(400.0, connect=60.0, read=400.0),
                         follow_redirects=True,
-                    )
-                    if dl.status_code == 200 and len(dl.content) > 100:
-                        result.data = dl.content
-                        result.success = True
-                        if file_ext_hint:
-                            ext = file_ext_hint if file_ext_hint.startswith(".") else f".{file_ext_hint}"
-                            ext_low = ext.lower()
-                            mime_map = {
-                                ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-                                ".webp": "image/webp", ".mp4": "video/mp4",
-                            }
-                            result.file_ext = ext_low
-                            result.mime_type = mime_map.get(ext_low, "application/octet-stream")
-                            result.media_type = "video" if ext_low == ".mp4" else "image"
-                            return result
-                        # 没给 file_ext 就嗅探
-                        return await self._detect_file_type(result, is_video)
-                    result.error = f"下载文件失败: HTTP {dl.status_code}"
-                    break
+                    ) as dl:
+                        if dl.status_code != 200:
+                            result.error = f"下载文件失败: HTTP {dl.status_code}"
+                            break
+                        with open(output_filepath, "wb") as f:
+                            async for chunk in dl.aiter_bytes(chunk_size=64 * 1024):
+                                f.write(chunk)
+                                bytes_written += len(chunk)
+
+                    if bytes_written < 100:
+                        result.error = f"下载文件过小 ({bytes_written} bytes)"
+                        # 清掉过小的 partial
+                        try:
+                            os.remove(output_filepath)
+                        except Exception:
+                            pass
+                        break
+
+                    # 成功
+                    result.success = True
+                    result.output_file_path = output_filepath  # 关键：caller 不需要再 f.write(result.data)
+                    result.data = b""  # 不在内存里存
+                    result.file_ext = ext_low
+                    result.mime_type = mime_map.get(ext_low, "application/octet-stream")
+                    result.media_type = "video" if ext_low == ".mp4" else "image"
+                    return result
+
                 except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError) as e:
-                    logger.warning(f"DL attempt {dl_attempt+1} failed: {e}")
+                    logger.warning(f"DL attempt {dl_attempt+1} failed: {e} (wrote {bytes_written} bytes)")
+                    # 流式中断：清掉 partial 文件，重试时重新建
+                    try:
+                        if os.path.exists(output_filepath):
+                            os.remove(output_filepath)
+                    except Exception:
+                        pass
                     if dl_attempt == 2:
                         result.error = f"下载文件异常: {e}"
                     await asyncio.sleep(1)

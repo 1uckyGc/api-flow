@@ -282,13 +282,20 @@ async def execute_generation_task(task_id: str):
             group_id=task.group_id,
         )
 
-        if result.success and result.data:
-            # 保存文件
-            filename = f"{uuid.uuid4().hex}{result.file_ext}"
-            filepath = os.path.join("outputs", filename)
-            with open(filepath, "wb") as f:
-                f.write(result.data)
-                
+        # success 判定：要么 HOLO 流式已经直接落盘（result.output_file_path），
+        # 要么 Flow2API/Grok 把 bytes 放在 result.data（兼容旧路径）
+        if result.success and (getattr(result, "output_file_path", "") or result.data):
+            if getattr(result, "output_file_path", ""):
+                # 流式路径：文件已在 outputs/<uuid>.<ext>，复用文件名
+                filepath = result.output_file_path
+                filename = os.path.basename(filepath)
+            else:
+                # 旧路径：result.data 是完整 bytes，自己写盘（Flow2API/Grok 仍走这条）
+                filename = f"{uuid.uuid4().hex}{result.file_ext}"
+                filepath = os.path.join("outputs", filename)
+                with open(filepath, "wb") as f:
+                    f.write(result.data)
+
             task.output_file = filepath
             
             # --- 全局视频尾部劣化切除逻辑 (强关联 veo 和 mp4 产物) ---
