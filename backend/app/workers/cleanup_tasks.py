@@ -10,13 +10,18 @@
   C1: fission 血缘链整链一起删
 """
 import os
+import shutil
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from app.database import SessionLocal
 from app.models.api_call_log import ApiCallLog
-from app.models.task import Task, TaskGroup, TaskStatus
+from app.models.task import Task, TaskGroup, TaskSource, TaskStatus
 from app.utils.logger import logger
 from app.workers.celery_app import celery_app
+
+
+REPLICATE_BASE = Path("uploads/replicate")
 
 
 RETENTION_DAYS_LOGS = 30
@@ -130,6 +135,17 @@ def purge_old_artifacts() -> dict:
             anchor = (group.config_json or {}).get("anchor_file") if isinstance(group.config_json, dict) else None
             if _safe_remove(anchor):
                 deleted_files += 1
+
+            # 复刻视频作业的整个工作目录（uploads/replicate/<id>/）
+            if group.source == TaskSource.STORYBOARD:
+                workdir = REPLICATE_BASE / group.id
+                # 双保险：再 resolve 一次防止 .. 越界
+                try:
+                    if workdir.exists() and str(workdir.resolve()).startswith(str(REPLICATE_BASE.resolve())):
+                        shutil.rmtree(workdir)
+                        deleted_files += 1
+                except Exception as e:
+                    logger.warning(f"purge: rmtree replicate workdir {workdir} failed: {e}")
 
             # sub tasks 的所有文件
             for t in group.tasks:

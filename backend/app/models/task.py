@@ -20,11 +20,13 @@ class TaskSource(str, enum.Enum):
     DIRECTOR = "DIRECTOR"
     DIRECTOR_VIDEO = "DIRECTOR_VIDEO"
     STORYBOARD_FISSION = "STORYBOARD_FISSION"
+    STORYBOARD = "STORYBOARD"
 
 class GroupStatus(str, enum.Enum):
     PENDING = "pending"
     PROCESSING = "processing"
     NEEDS_REVIEW = "needs_review"
+    AWAITING_LLM_INPUT = "awaiting_llm_input"
     COMPLETED = "completed"
     FAILED = "failed"
 

@@ -237,7 +237,10 @@ async def execute_generation_task(task_id: str):
         
         # 准备参数
         group = task.group
-        model = group.config_json.get("model", "veo_3_1_t2v_portrait")
+        # task.config_json 优先 group.config_json （让 storyboard 等"一组多 model"模式生效）
+        task_cfg = task.config_json or {}
+        merged_cfg = {**(group.config_json or {}), **task_cfg}
+        model = task_cfg.get("model") or group.config_json.get("model", "veo_3_1_t2v_portrait")
         prompt = task.prompt or group.global_prompt or ""
         
         # 拦截未被 DirectorWorker 初始化的挂起分镜被手动重试
@@ -272,7 +275,7 @@ async def execute_generation_task(task_id: str):
             model=model,
             prompt=prompt,
             image_paths=task.input_files if task.input_files else None,
-            config_json=group.config_json,
+            config_json=merged_cfg,
             api_key=api_key,
             max_retries=max_retries,
             progress_callback=on_progress,
