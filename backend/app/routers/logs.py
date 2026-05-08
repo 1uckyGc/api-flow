@@ -4,8 +4,12 @@
 GET /api/logs                  本地表分页查询（admin 看全部，普通用户只看自己）
 GET /api/logs/balance          代理 HOLO GET /me
 GET /api/logs/transactions     代理 HOLO GET /me/transactions
+GET /api/logs/providers        多 provider 余额/用量聚合（admin only）
 GET /api/logs/{id}             单条详情（admin 或 owner）
 """
+import asyncio
+import json
+import re
 from datetime import datetime
 from typing import Optional
 
@@ -175,6 +179,147 @@ async def holo_transactions(
     except Exception as e:
         logger.warning(f"HOLO transactions proxy failed: {e}")
         raise HTTPException(502, f"HOLO 代理失败: {e}")
+
+
+# ───────────────────────── 多 provider 聚合余额/用量 ─────────────────────────
+
+async def _probe_holo() -> dict:
+    base = _holo_base()
+    if not base:
+        return {"provider": "holo", "label": "HOLO", "online": False, "error": "未配置"}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as cli:
+            r = await cli.get(f"{base}/me", headers=_holo_headers())
+            r.raise_for_status()
+            d = r.json()
+        return {
+            "provider": "holo",
+            "label": "HOLO",
+            "online": True,
+            "primary": {"label": "余额", "value": d.get("credits"), "unit": "credits"},
+            "metrics": {
+                "frozen_credits": d.get("frozen_credits"),
+                "daily_used": d.get("daily_used"),
+                "daily_credits_used": d.get("daily_credits_used"),
+                "today_img": d.get("today_img"),
+                "today_vid": d.get("today_vid"),
+                "img_30d": d.get("img_30d"),
+                "vid_30d": d.get("vid_30d"),
+                "rpm_limit": d.get("rpm_limit"),
+                "account_tag": d.get("account_tag"),
+                "tier_thresholds": d.get("tier_thresholds"),
+                "name": d.get("name"),
+            },
+        }
+    except Exception as e:
+        return {"provider": "holo", "label": "HOLO", "online": False, "error": str(e)[:200]}
+
+
+async def _probe_packyapi_gemini() -> dict:
+    key = (settings.PACKYAPI_GEMINI_KEY or "").strip()
+    base = (settings.PACKYAPI_BASE_URL or "https://www.packyapi.com").rstrip("/")
+    label = "PackyAPI · Gemini"
+    provider = "packyapi-gemini"
+    if not key:
+        return {"provider": provider, "label": label, "online": False, "error": "PACKYAPI_GEMINI_KEY 未配置"}
+    headers = {"Authorization": f"Bearer {key}"}
+    usage = None
+    sub = None
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as cli:
+            ru = await cli.get(f"{base}/v1/dashboard/billing/usage", headers=headers)
+            if ru.status_code == 200:
+                usage = ru.json()
+            rs = await cli.get(f"{base}/v1/dashboard/billing/subscription", headers=headers)
+            if rs.status_code == 200:
+                sub = rs.json()
+    except Exception as e:
+        return {"provider": provider, "label": label, "online": False, "error": str(e)[:200]}
+
+    if usage is None and sub is None:
+        return {"provider": provider, "label": label, "online": False, "error": "subscription/usage endpoints 无响应"}
+
+    total_usage = (usage or {}).get("total_usage")
+    return {
+        "provider": provider,
+        "label": label,
+        "online": True,
+        "primary": {"label": "已用额度", "value": round(total_usage, 2) if isinstance(total_usage, (int, float)) else total_usage, "unit": "USD"},
+        "metrics": {
+            "hard_limit_usd": (sub or {}).get("hard_limit_usd"),
+            "soft_limit_usd": (sub or {}).get("soft_limit_usd"),
+            "has_payment_method": (sub or {}).get("has_payment_method"),
+            "access_until": (sub or {}).get("access_until"),
+            "note": "sk-key 仅暴露累计 USD，账户余额需在 packyapi.com 控制台查",
+        },
+    }
+
+
+_DREAMINA_BIN = "/root/.local/bin/dreamina"
+
+
+async def _probe_dreamina() -> dict:
+    label = "即梦 (Dreamina)"
+    provider = "dreamina"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            _DREAMINA_BIN, "user_credit",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15.0)
+    except FileNotFoundError:
+        return {"provider": provider, "label": label, "online": False, "error": "dreamina CLI 未安装在容器内"}
+    except asyncio.TimeoutError:
+        return {"provider": provider, "label": label, "online": False, "error": "dreamina user_credit 超时"}
+    except Exception as e:
+        return {"provider": provider, "label": label, "online": False, "error": str(e)[:200]}
+
+    out = (stdout or b"").decode("utf-8", "replace") + (stderr or b"").decode("utf-8", "replace")
+    if "未检测到有效登录态" in out or "请先执行 dreamina login" in out:
+        return {
+            "provider": provider, "label": label, "online": False,
+            "error": "未登录 — SSH 进 worker 跑 `dreamina login` 一次扫码授权",
+        }
+    # try parse JSON
+    m = re.search(r"\{[\s\S]*\}", out)
+    if not m:
+        return {"provider": provider, "label": label, "online": False, "error": f"无法解析输出: {out[:200]}"}
+    try:
+        d = json.loads(m.group(0))
+    except Exception:
+        return {"provider": provider, "label": label, "online": False, "error": f"JSON 解析失败: {out[:200]}"}
+    return {
+        "provider": provider,
+        "label": label,
+        "online": True,
+        "primary": {"label": "余额", "value": d.get("total_credit"), "unit": "credits"},
+        "metrics": {
+            "user_id": d.get("user_id"),
+            "user_name": d.get("user_name") or "（未设置）",
+            "vip_level": d.get("vip_level"),
+        },
+    }
+
+
+@router.get("/providers")
+async def providers_summary(current_user: User = Depends(get_current_user)):
+    """聚合所有 provider 的余额/用量信息（仅 admin）。
+
+    并发拉：HOLO `/me`、PackyAPI Gemini billing/usage+subscription、Dreamina `user_credit`。
+    每个 provider 返回统一形态：
+        {provider, label, online, primary: {label, value, unit}, metrics: {...}, error?}
+    单个 provider 探测失败不影响其他，前端按 online=false 展示降级。
+    """
+    if not _is_admin(current_user):
+        raise HTTPException(403, "仅管理员可查看 provider 余额信息")
+    results = await asyncio.gather(
+        _probe_holo(),
+        _probe_packyapi_gemini(),
+        _probe_dreamina(),
+        return_exceptions=False,
+    )
+    return {"providers": results, "fetched_at": datetime.utcnow().isoformat() + "Z"}
 
 
 @router.get("/{log_id}")

@@ -1,10 +1,17 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { ArrowLeft, RefreshCw } from 'lucide-react';
+import { ArrowLeft, RefreshCw, AlertCircle, CheckCircle2 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
-import { fetchLogs, fetchLogDetail, fetchHoloBalance, fetchHoloTransactions } from '../api/logs';
+import { fetchLogs, fetchLogDetail, fetchHoloTransactions, fetchProvidersSummary } from '../api/logs';
 import useAuthStore from '../stores/useAuthStore';
 
-const PROVIDER_LABEL = { holo: 'HOLO', flow2api: 'Flow2API', grok: 'Grok' };
+const PROVIDER_LABEL = { holo: 'HOLO', flow2api: 'Flow2API', grok: 'Grok', dreamina: '即梦', 'packyapi-gemini': 'PackyAPI' };
+const PROVIDER_ACCENT = {
+  holo: '#6366f1',
+  'packyapi-gemini': '#10b981',
+  dreamina: '#f43f5e',
+  flow2api: '#0ea5e9',
+  grok: '#a855f7',
+};
 const STATUS_COLOR = {
   completed: '#10b981',
   failed: '#ef4444',
@@ -53,6 +60,87 @@ function Kpi({ label, value, hint }) {
   );
 }
 
+function fmtNum(v) {
+  if (v == null) return '—';
+  if (typeof v === 'number') {
+    if (Number.isInteger(v)) return v.toLocaleString();
+    return v.toFixed(2);
+  }
+  return String(v);
+}
+
+function ProviderCard({ p }) {
+  const accent = PROVIDER_ACCENT[p.provider] || '#888';
+  const icon = p.online
+    ? <CheckCircle2 size={14} style={{ color: '#10b981' }} />
+    : <AlertCircle size={14} style={{ color: '#ef4444' }} />;
+
+  return (
+    <div style={{
+      flex: 1,
+      minWidth: 240,
+      padding: 14,
+      background: 'var(--surface-2)',
+      border: `1px solid var(--border-subtle)`,
+      borderTop: `3px solid ${accent}`,
+      borderRadius: 12,
+      display: 'flex', flexDirection: 'column', gap: 8,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>
+        {icon}
+        {p.label}
+      </div>
+
+      {!p.online && (
+        <div style={{ fontSize: 11, color: '#ef4444', wordBreak: 'break-word' }}>
+          {p.error || '不可用'}
+        </div>
+      )}
+
+      {p.online && p.primary && (
+        <div>
+          <div style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>{p.primary.label}</div>
+          <div style={{ fontSize: 24, fontWeight: 700, color: 'var(--text-primary)' }}>
+            {fmtNum(p.primary.value)}
+            <span style={{ fontSize: 11, color: 'var(--text-tertiary)', marginLeft: 6, fontWeight: 500 }}>
+              {p.primary.unit}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {p.online && p.metrics && (
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: '1fr 1fr',
+          gap: '4px 12px',
+          paddingTop: 8,
+          borderTop: '1px dashed var(--border-subtle)',
+          fontSize: 11,
+          color: 'var(--text-secondary)',
+        }}>
+          {Object.entries(p.metrics)
+            .filter(([k, v]) => v != null && v !== '' && k !== 'note')
+            .slice(0, 8)
+            .map(([k, v]) => (
+              <div key={k} style={{ display: 'flex', justifyContent: 'space-between', gap: 6 }}>
+                <span style={{ color: 'var(--text-tertiary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{k}</span>
+                <span style={{ fontWeight: 600, color: 'var(--text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 110, textAlign: 'right' }} title={String(v)}>
+                  {Array.isArray(v) ? v.join('/') : fmtNum(v)}
+                </span>
+              </div>
+            ))}
+          {p.metrics.note && (
+            <div style={{ gridColumn: '1 / -1', fontSize: 10, color: 'var(--text-tertiary)', fontStyle: 'italic', marginTop: 4 }}>
+              ⓘ {p.metrics.note}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 
 export default function Logs() {
   const navigate = useNavigate();
@@ -60,26 +148,28 @@ export default function Logs() {
   const isAdmin = !!user?.is_admin;
 
   const [tab, setTab] = useState('local');  // 'local' | 'holo'
-  const [balance, setBalance] = useState(null);
-  const [balanceErr, setBalanceErr] = useState(null);
+  const [providers, setProviders] = useState([]);
+  const [providersErr, setProvidersErr] = useState(null);
+  const [providersFetchedAt, setProvidersFetchedAt] = useState(null);
 
-  // ── 余额轮询（仅 admin）——
-  const loadBalance = useCallback(async () => {
+  // ── 多 provider 余额聚合（仅 admin，30s 轮询）——
+  const loadProviders = useCallback(async () => {
     if (!isAdmin) return;
     try {
-      const data = await fetchHoloBalance();
-      setBalance(data);
-      setBalanceErr(null);
+      const data = await fetchProvidersSummary();
+      setProviders(data?.providers || []);
+      setProvidersFetchedAt(data?.fetched_at);
+      setProvidersErr(null);
     } catch (e) {
-      setBalanceErr(e?.response?.data?.detail || e.message || '加载失败');
+      setProvidersErr(e?.response?.data?.detail || e.message || '加载失败');
     }
   }, [isAdmin]);
   useEffect(() => {
     if (!isAdmin) return;
-    loadBalance();
-    const t = setInterval(loadBalance, 30000);
+    loadProviders();
+    const t = setInterval(loadProviders, 30000);
     return () => clearInterval(t);
-  }, [loadBalance, isAdmin]);
+  }, [loadProviders, isAdmin]);
 
   return (
     <div style={{ padding: 24, minHeight: '100vh', background: 'var(--surface-1)' }}>
@@ -95,7 +185,7 @@ export default function Logs() {
         <h1 style={{ fontSize: 22, fontWeight: 700, color: 'var(--text-primary)', margin: 0 }}>
           调用日志与账单
         </h1>
-        <button onClick={loadBalance} title="刷新" style={{
+        <button onClick={loadProviders} title="刷新" style={{
           marginLeft: 'auto', padding: 8, borderRadius: 8,
           background: 'var(--surface-2)', border: '1px solid var(--border-subtle)',
           cursor: 'pointer', color: 'var(--text-secondary)',
@@ -104,14 +194,23 @@ export default function Logs() {
         </button>
       </div>
 
-      {/* KPI（仅管理员可见，HOLO 余额是账户级共享数据）*/}
+      {/* Provider 信息卡片网格（仅管理员可见，账户级共享数据）*/}
       {isAdmin && (
-        <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
-          <Kpi label="HOLO 余额" value={balance?.credits ?? '—'} hint={balanceErr ? `⚠ ${balanceErr}` : null} />
-          <Kpi label="冻结积分" value={balance?.frozen_credits ?? '—'} />
-          <Kpi label="今日已扣" value={balance?.daily_credits_used ?? '—'} hint={`${balance?.daily_used ?? 0} 次请求`} />
-          <Kpi label="今日生成" value={`${balance?.today_img ?? 0} 图 / ${balance?.today_vid ?? 0} 视`} />
-        </div>
+        <>
+          <div style={{ display: 'flex', gap: 12, marginBottom: 8, flexWrap: 'wrap' }}>
+            {providers.length === 0 && (
+              <div style={{ flex: 1, padding: 14, color: 'var(--text-tertiary)', fontSize: 12 }}>
+                {providersErr ? `⚠ ${providersErr}` : '加载中…'}
+              </div>
+            )}
+            {providers.map(p => <ProviderCard key={p.provider} p={p} />)}
+          </div>
+          {providersFetchedAt && (
+            <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginBottom: 16 }}>
+              更新于 {providersFetchedAt.slice(11, 19)} UTC · 30s 自动刷新
+            </div>
+          )}
+        </>
       )}
 
       {/* Tabs：HOLO 官方账单仅管理员可见 */}
