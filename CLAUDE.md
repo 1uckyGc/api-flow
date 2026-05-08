@@ -109,7 +109,7 @@ alembic upgrade head
 - **`config_json` 是扩展点。** 任何按模式区分的元数据（锚点文件、分镜 index、模型名、画幅比、裂变阶段等）都进 `TaskGroup.config_json` 或 `Task.config_json`，不要新增列。
 - **导演模式是锚点优先。** 第 0 帧串行先生成，后续所有帧都拿第 0 帧当参考图，靠这种方式锁人物 / 场景一致性。见 `backend/app/workers/director_worker.py`。
 - **导演模式有人工复核闸。** 剧本解析完后，group 状态翻成 `NEEDS_REVIEW`，worker 主动退出。前端收集用户编辑后调 `/api/director/confirm-scenes`，worker 从 Phase 2 续跑。
-- **httpx 连接池绑事件循环。** `services/ai_service.py::AIClient._get_client` 在检测到 loop 漂移时会重建连接池（修 Celery + asyncio 经典踩坑）。**别把 `AIClient` 状态在多个 loop 之间裸共享**。
+- **httpx client 每 task 自管，AIClient 不再缓存共享池**。`_generate_holo` / `_generate_flow2api` 入口 `client = httpx.AsyncClient(...)` + 末尾 `finally aclose`。**绝对不要再加 `self._http_pool`**：celery threads 池下 100 thread 各有自己的 loop，共享池被多 thread 检测 loop drift 互相 aclose → "Cannot send a request, as the client has been closed"。每 task 多一次 TLS handshake (~100ms) 换零 race，对 30-60s 视频任务忽略不计。grok_client 一直是 async with 模式，不受影响。
 - **API 限流就一个入口**：`utils/scheduler.py::wait_for_api_slot`。所有图像、视频上游调用都过这里。
 - **视频延展走尾帧接力**：`extract_last_frame_base64_sync` 用 `ffmpeg -sseof -0.1` 抓视频最后一帧，base64 喂回模型作为下一段的种子。
 - **三 provider 按模型名分发，不再有"全局开关"**。`services/model_registry.py::resolve_provider(model)` 是路由权威：
@@ -137,7 +137,7 @@ alembic upgrade head
 - **Celery worker 用 `--pool=threads` 不是 prefork**。HOLO/Flow2API 调用是纯 IO-bound（HTTP 等待），prefork 模式每个 worker 是独立 Python 进程，~80MB baseline，c=100 直接吃 8GB → OOM；threads 池 1 进程 + N 线程，c=100 仅 ~80MB 总占用。现状已切 threads + `MAX_CONCURRENT_TASKS=100`（远程 154.53.75.37 实测稳定）。
   - 配套：`backend/app/database.py` `create_engine(... pool_size=30, max_overflow=20, pool_pre_ping=True, pool_recycle=300)` — 默认 5+10 不够 100 threads 同时拉连接，会 QueuePool overflow
   - threads 池不支持 `--max-memory-per-child`，用 `--max-tasks-per-child=200` 替代（每 worker 处理 200 任务后自动回收）
-  - 项目 globals 全部已是 per-loop 隔离（`AIClient._get_client` / `grok_client._get_client` / `_redis_client`），threads 共享内存安全；**未来加 module-level mutable state 必须考虑线程竞态**
+  - threads 共享内存的 race 实战教训：曾经 `AIClient._http_pool` "per-loop 隔离" 在 prefork 模式下没事（每进程一个 loop），切 threads 后 100 个 loop 同时活互相 aclose 导致大面积失败；现状已改成 per-task client（见上一条）。`grok_client` 用 `async with`、scheduler `_redis_client` 是 per-loop 单例（每 loop 各自的，不共享同一对象）→ 安全。**未来加 module-level mutable state 必须考虑线程竞态**
 - **速率锁按 provider 拆桶，HOLO 不再有本地锁**。`ai_service.py::generate()` 现状：
   - HOLO：跳过 `wait_for_api_slot`（HOLO `/v1/generate` 上游 85 generators 自管排队）
   - Flow2API：`wait_for_api_slot(api_type="flow2api", interval_base=5)` — 自托管易触验证码，5s 一个 slot 严格串行
