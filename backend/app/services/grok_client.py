@@ -17,7 +17,7 @@ import os
 import httpx
 
 from app.config import settings
-from app.services.ai_service import GenerationResult, get_mime_type, image_to_base64_sync
+from app.services.ai_service import GenerationResult, get_mime_type, image_to_base64_sync, stream_download_to_file
 from app.utils.logger import logger
 from app.utils.scheduler import wait_for_api_slot
 
@@ -108,20 +108,34 @@ class GrokClient:
                 if progress_callback:
                     await progress_callback("图片生成完毕，正在下载...")
 
-                dl = await client.get(img_url, timeout=httpx.Timeout(120.0), follow_redirects=True)
-                dl.raise_for_status()
-                raw = dl.content
-                if len(raw) < 100:
-                    return GenerationResult(success=False, error=f"下载的图片数据异常 ({len(raw)} bytes)")
+                # 流式下载（图片虽小，但保持统一架构 + 异常时清理 partial）
+                # 默认 .png — 如果下游嗅探需要精确 MIME，从前 4 字节读
+                # 但 Grok 图片返回的几乎都是 PNG 或 JPG；先按 PNG 落盘
+                try:
+                    filepath = await stream_download_to_file(
+                        client, img_url, ".png",
+                        timeout=httpx.Timeout(120.0),
+                        min_bytes=100,
+                    )
+                except Exception as e:
+                    return GenerationResult(success=False, error=f"下载图片失败: {e}")
 
-                if raw.startswith(b"\x89PNG"):
-                    mime, ext = "image/png", ".png"
-                elif raw.startswith(b"\xff\xd8"):
+                # MIME 嗅探：读前 4 字节看是 PNG 还是 JPG，必要时改扩展名
+                with open(filepath, "rb") as f:
+                    head = f.read(4)
+                if head.startswith(b"\xff\xd8"):
                     mime, ext = "image/jpeg", ".jpg"
+                    new_filepath = filepath[:-4] + ".jpg"
+                    os.rename(filepath, new_filepath)
+                    filepath = new_filepath
                 else:
                     mime, ext = "image/png", ".png"
 
-                return GenerationResult(success=True, media_type="image", data=raw, mime_type=mime, file_ext=ext)
+                return GenerationResult(
+                    success=True, media_type="image",
+                    output_file_path=filepath,
+                    mime_type=mime, file_ext=ext,
+                )
 
         except Exception as e:
             logger.error(f"GrokClient.generate_image failed: {e}")
@@ -216,16 +230,30 @@ class GrokClient:
                 if progress_callback:
                     await progress_callback("图像编辑完毕，正在下载...")
 
-                dl = await client.get(img_url, timeout=httpx.Timeout(120.0), follow_redirects=True)
-                dl.raise_for_status()
-                raw = dl.content
-                if raw.startswith(b"\x89PNG"):
-                    mime, ext = "image/png", ".png"
-                elif raw.startswith(b"\xff\xd8"):
+                # 流式下载到 outputs/<uuid>.png；MIME 嗅探后必要时改后缀
+                try:
+                    filepath = await stream_download_to_file(
+                        client, img_url, ".png",
+                        timeout=httpx.Timeout(120.0),
+                        min_bytes=100,
+                    )
+                except Exception as e:
+                    return GenerationResult(success=False, error=f"下载编辑图失败: {e}")
+
+                with open(filepath, "rb") as f:
+                    head = f.read(4)
+                if head.startswith(b"\xff\xd8"):
                     mime, ext = "image/jpeg", ".jpg"
+                    new_filepath = filepath[:-4] + ".jpg"
+                    os.rename(filepath, new_filepath)
+                    filepath = new_filepath
                 else:
                     mime, ext = "image/png", ".png"
-                return GenerationResult(success=True, media_type="image", data=raw, mime_type=mime, file_ext=ext)
+                return GenerationResult(
+                    success=True, media_type="image",
+                    output_file_path=filepath,
+                    mime_type=mime, file_ext=ext,
+                )
 
         except Exception as e:
             logger.error(f"GrokClient.generate_image_edit failed: {e}")
@@ -336,25 +364,25 @@ class GrokClient:
                         if progress_callback:
                             await progress_callback("视频生成完毕，正在下载...")
 
-                        # 优先用 /content 接口直接下载 mp4
-                        try:
-                            dl = await client.get(
-                                content_url,
-                                headers=_auth_headers(api_key),
-                                timeout=httpx.Timeout(300.0),
-                                follow_redirects=True,
-                            )
-                            if dl.status_code == 200 and len(dl.content) > 1000:
-                                return GenerationResult(success=True, media_type="video", data=dl.content, mime_type="video/mp4", file_ext=".mp4")
-                        except Exception as e:
-                            logger.warning(f"GrokClient: /content download failed, fallback to url: {e}")
-
-                        # 降级：从响应的 url 字段下载
-                        video_url = status_data.get("url", "")
-                        if video_url:
-                            dl2 = await client.get(video_url, timeout=httpx.Timeout(300.0), follow_redirects=True)
-                            if dl2.status_code == 200 and len(dl2.content) > 1000:
-                                return GenerationResult(success=True, media_type="video", data=dl2.content, mime_type="video/mp4", file_ext=".mp4")
+                        # 流式下载 mp4 到 outputs/<uuid>.mp4，峰值内存 ~64KB
+                        # 优先 /content 接口；失败回退 status_data.url
+                        for source_url, label in [(content_url, "/content"), (status_data.get("url", ""), "url")]:
+                            if not source_url:
+                                continue
+                            try:
+                                filepath = await stream_download_to_file(
+                                    client, source_url, ".mp4",
+                                    headers=_auth_headers(api_key),
+                                    timeout=httpx.Timeout(300.0),
+                                    min_bytes=1000,
+                                )
+                                return GenerationResult(
+                                    success=True, media_type="video",
+                                    output_file_path=filepath,
+                                    mime_type="video/mp4", file_ext=".mp4",
+                                )
+                            except Exception as e:
+                                logger.warning(f"GrokClient: {label} stream download failed: {e}")
 
                         return GenerationResult(success=False, error="Grok 视频完成但下载失败")
 

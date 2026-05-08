@@ -6,12 +6,72 @@ import os
 import re
 import subprocess
 import tempfile
+import uuid as _uuid
 from typing import Optional, Callable
 
 import httpx
 from app.config import settings
 
 from app.utils.logger import logger
+
+
+async def stream_download_to_file(
+    client: httpx.AsyncClient,
+    url: str,
+    ext: str,
+    headers: dict | None = None,
+    timeout: httpx.Timeout | None = None,
+    min_bytes: int = 100,
+) -> str:
+    """流式下载到 outputs/<uuid>.<ext>，返回 filepath。
+
+    全程 chunk-by-chunk 写盘，峰值内存仅 64KB，避免 50-100MB 视频整段进内存。
+    异常或下载过小时清理 partial 文件并 re-raise。
+
+    Args:
+        client: 调用方传入的 httpx.AsyncClient（已是 per-task 自管 lifecycle）
+        url: 下载地址
+        ext: 扩展名（含或不含 . 都行）
+        headers: 可选请求头（如鉴权 Bearer）
+        timeout: 可选超时（默认 400s read / 60s connect）
+        min_bytes: 下载字节小于此值视为失败（默认 100 字节防空文件）
+
+    Returns:
+        outputs/<uuid>.<ext> 的相对路径
+    Raises:
+        httpx.* 网络异常 / RuntimeError("HTTP {status}") / RuntimeError("too small")
+    """
+    if not ext.startswith("."):
+        ext = "." + ext
+    ext = ext.lower()
+    timeout = timeout or httpx.Timeout(400.0, connect=60.0, read=400.0)
+
+    output_filename = f"{_uuid.uuid4().hex}{ext}"
+    output_filepath = os.path.join("outputs", output_filename)
+    os.makedirs("outputs", exist_ok=True)
+
+    bytes_written = 0
+    try:
+        async with client.stream(
+            "GET", url, headers=headers or {}, timeout=timeout, follow_redirects=True
+        ) as dl:
+            if dl.status_code != 200:
+                raise RuntimeError(f"HTTP {dl.status_code}")
+            with open(output_filepath, "wb") as f:
+                async for chunk in dl.aiter_bytes(chunk_size=64 * 1024):
+                    f.write(chunk)
+                    bytes_written += len(chunk)
+        if bytes_written < min_bytes:
+            raise RuntimeError(f"downloaded too small ({bytes_written} bytes)")
+        return output_filepath
+    except Exception:
+        # 清掉 partial 文件
+        try:
+            if os.path.exists(output_filepath):
+                os.remove(output_filepath)
+        except Exception:
+            pass
+        raise
 
 class GenerationResult:
     def __init__(self, success: bool=False, media_type: str="", data: bytes=b"", mime_type: str="", error: str="", file_ext: str="", output_file_path: str=""):
@@ -517,36 +577,51 @@ class AIClient:
             url_match = re.search(r"(https?://[^\s\)\"\[\]]+)", collected_content)
             if url_match:
                 file_url = url_match.group(1).rstrip(")'\",;")
-                # 下载阶段独立重试逻辑 (针对高并发下可能出现的 Server disconnected / Peer closed)
+                # 流式下载到 outputs/<uuid>.<ext>，峰值内存 ~64KB
+                # 视频先按 .mp4 写盘；图片先按 .png；后面 _detect_file_type 嗅探
+                tmp_ext = ".mp4" if is_video else ".png"
+                last_err = ""
                 for dl_attempt in range(3):
                     try:
                         if progress_callback and dl_attempt > 0:
                             await progress_callback(f"正在重试下载 ({dl_attempt}/3)...")
-                        
-                        dl_response = await client.get(
-                            file_url, 
-                            timeout=httpx.Timeout(400.0, connect=60.0, read=400.0), 
-                            follow_redirects=True
+                        filepath = await stream_download_to_file(
+                            client, file_url, tmp_ext,
+                            timeout=httpx.Timeout(400.0, connect=60.0, read=400.0),
+                            min_bytes=100,
                         )
-                        if dl_response.status_code == 200:
-                            result.data = dl_response.content
-                            if len(result.data) > 100:
-                                result.success = True
-                                return await self._detect_file_type(result, is_video)
-                            result.error = f"下载的数据过小 ({len(result.data)} bytes)"
-                        else:
-                            result.error = f"下载文件失败: HTTP {dl_response.status_code}"
-                        
-                        # 如果是业务逻辑错误（如404），直接跳出不再重试
-                        break
+                        # 嗅探前 32 字节，必要时改后缀（mp4 / png / jpg / webp）
+                        with open(filepath, "rb") as f:
+                            head = f.read(32)
+                        new_ext = tmp_ext
+                        if head.startswith(b"\x89PNG"):
+                            new_ext = ".png"
+                        elif head.startswith(b"\xff\xd8"):
+                            new_ext = ".jpg"
+                        elif head.startswith(b"RIFF") and len(head) > 11 and head[8:12] == b"WEBP":
+                            new_ext = ".webp"
+                        elif b"ftyp" in head[:32]:
+                            new_ext = ".mp4"
+                        if new_ext != tmp_ext:
+                            new_filepath = filepath[:-len(tmp_ext)] + new_ext
+                            os.rename(filepath, new_filepath)
+                            filepath = new_filepath
+                        mime_map = {".png":"image/png",".jpg":"image/jpeg",".webp":"image/webp",".mp4":"video/mp4"}
+                        result.success = True
+                        result.output_file_path = filepath
+                        result.file_ext = new_ext
+                        result.mime_type = mime_map.get(new_ext, "application/octet-stream")
+                        result.media_type = "video" if new_ext == ".mp4" else "image"
+                        return result
                     except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError) as e:
+                        last_err = f"网络异常: {e}"
                         logger.warning(f"Download attempt {dl_attempt+1} failed for {file_url}: {e}")
-                        if dl_attempt == 2:
-                            result.error = f"下载文件异常 (多次重试失败): {str(e)}"
                         await asyncio.sleep(1)
                     except Exception as e:
-                        result.error = f"下载文件出现未知异常: {str(e)}"
-                        break
+                        # 业务错误（如 404 / too small）不重试
+                        result.error = f"下载文件出现异常: {e}"
+                        return result
+                result.error = f"下载文件异常 (多次重试失败): {last_err}"
                 return result
 
             # 如果完全没匹配到任何媒体特征
