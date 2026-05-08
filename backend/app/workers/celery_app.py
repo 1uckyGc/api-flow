@@ -16,6 +16,7 @@ celery_app = Celery(
         "app.workers.director_worker",
         "app.workers.workflow_worker",
         "app.workers.cleanup_tasks",
+        "app.workers.replicate_tasks",
     ],
 )
 

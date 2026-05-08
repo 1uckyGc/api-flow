@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Upload, Image as ImageIcon, Film, Plus, X } from 'lucide-react';
+import { Upload, Image as ImageIcon, Film, Plus, X, Zap } from 'lucide-react';
 
 const initialBrand = {
   brand_name: '',
@@ -9,11 +9,23 @@ const initialBrand = {
   pain_points: '',          // 多行文本，每行一条
 };
 
+// 5 个 Gemini 模型，按推荐度从上到下排列。当前后端只接 gemini-3-flash-preview，
+// 其他先 disabled 占位，等后端开通对应通道再放开。
+const GEMINI_MODEL_OPTIONS = [
+  { value: 'gemini-3-flash-preview', label: 'gemini-3-flash-preview · 快 · 低价（推荐）', disabled: false },
+  { value: 'gemini-3-pro-preview', label: 'gemini-3-pro-preview · 高质量', disabled: true },
+  { value: 'gemini-3.1-pro-preview', label: 'gemini-3.1-pro-preview · 最新 pro', disabled: true },
+  { value: 'gemini-2.5-pro', label: 'gemini-2.5-pro · 老 pro · token 4 倍贵', disabled: true },
+  { value: 'gemini-2.5-flash', label: 'gemini-2.5-flash · 老 flash · token 4 倍贵', disabled: true },
+];
+
 export default function InputForm({ onSubmit, submitting }) {
   const [title, setTitle] = useState('');
   const [video, setVideo] = useState(null);
   const [productImages, setProductImages] = useState([]);
   const [brand, setBrand] = useState(initialBrand);
+  const [autoMode, setAutoMode] = useState(true);
+  const [geminiModel, setGeminiModel] = useState('gemini-3-flash-preview');
 
   const handleVideo = (e) => {
     const f = e.target.files?.[0];
@@ -43,6 +55,8 @@ export default function InputForm({ onSubmit, submitting }) {
     const fd = new FormData();
     fd.append('title', title.trim());
     fd.append('sample_video', video);
+    fd.append('auto_mode', autoMode ? 'true' : 'false');
+    if (autoMode) fd.append('gemini_model', geminiModel);
     productImages.forEach(img => fd.append('product_images', img));
 
     const linesToList = (s) => (s || '').split('\n').map(x => x.trim()).filter(Boolean);
@@ -178,6 +192,51 @@ export default function InputForm({ onSubmit, submitting }) {
         />
       </Field>
 
+      {/* 自动模式 */}
+      <div
+        className="mt-8 mb-3 rounded-lg p-4"
+        style={{ background: 'var(--surface-1)', border: '1px solid var(--border-subtle)' }}
+      >
+        <label className="flex items-start gap-3 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={autoMode}
+            onChange={e => setAutoMode(e.target.checked)}
+            className="mt-1"
+          />
+          <div className="flex-1">
+            <div className="text-sm font-medium flex items-center gap-1.5" style={{ color: 'var(--text-primary)' }}>
+              <Zap size={14} style={{ color: 'var(--accent)' }} />
+              自动模式（Gemini 跑 LLM）
+            </div>
+            <div className="text-xs mt-1" style={{ color: 'var(--text-tertiary)' }}>
+              勾选后系统直接把样片视频丢给 Gemini 跑 6 阶段流程，30-90 秒后直接出 GU。
+              不勾选则需要你手动复制主提示词到 ChatGPT/Gemini 网页，跑完粘回来。
+            </div>
+          </div>
+        </label>
+
+        {autoMode && (
+          <div className="mt-3 ml-7">
+            <label className="text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>
+              LLM 模型
+            </label>
+            <select
+              value={geminiModel}
+              onChange={e => setGeminiModel(e.target.value)}
+              className="mt-1 w-full px-3 py-2 rounded-lg outline-none text-sm"
+              style={{ background: 'var(--surface-2)', border: '1px solid var(--border-default)' }}
+            >
+              {GEMINI_MODEL_OPTIONS.map(opt => (
+                <option key={opt.value} value={opt.value} disabled={opt.disabled}>
+                  {opt.label}{opt.disabled ? '（暂未开通）' : ''}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+      </div>
+
       <div className="mt-6 flex justify-end">
         <button
           type="submit"
@@ -190,7 +249,7 @@ export default function InputForm({ onSubmit, submitting }) {
           }}
         >
           <Upload size={16} />
-          {submitting ? '上传中…' : '提交并生成主提示词'}
+          {submitting ? '上传中…' : (autoMode ? '提交并自动跑 Gemini' : '提交并生成主提示词')}
         </button>
       </div>
     </form>

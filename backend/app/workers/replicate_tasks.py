@@ -1,0 +1,151 @@
+"""复刻视频自动模式 Celery 任务。
+
+run_storyboard_llm(job_id):
+  1. 从 DB 加 TaskGroup（source=STORYBOARD, status 应为 PROCESSING）
+  2. 读 master_prompt + 视频路径 + 商品图路径
+  3. 调 PackyGeminiClient → 拿到 LLM 完整输出
+  4. 落盘 full_llm_output.md
+  5. parse_llm_output → save_gus_to_dir
+  6. 更新 group: total_count=GU 数，status=COMPLETED；失败 → FAILED + progress_message=错误
+"""
+from __future__ import annotations
+
+import asyncio
+import os
+from pathlib import Path
+
+from app.config import settings
+from app.database import SessionLocal
+from app.models.task import GroupStatus, TaskGroup, TaskSource
+from app.services.packy_gemini import (
+    DEFAULT_GEMINI_MODEL,
+    PackyGeminiClient,
+    SUPPORTED_GEMINI_MODELS,
+)
+from app.services.storyboard.pipeline import parse_llm_output, save_gus_to_dir
+from app.utils.logger import logger
+from app.workers.celery_app import celery_app
+
+
+@celery_app.task(name="app.workers.replicate_tasks.run_storyboard_llm")
+def run_storyboard_llm(job_id: str) -> dict:
+    db = SessionLocal()
+    try:
+        group = (
+            db.query(TaskGroup)
+            .filter(
+                TaskGroup.id == job_id,
+                TaskGroup.source == TaskSource.STORYBOARD,
+            )
+            .first()
+        )
+        if not group:
+            logger.error(f"replicate auto: job {job_id} not found")
+            return {"error": "job not found"}
+
+        cfg = dict(group.config_json or {})
+        master_prompt_path = cfg.get("master_prompt_path")
+        video_path = cfg.get("video_path")
+        product_image_paths = cfg.get("product_image_paths") or []
+        chosen_model = cfg.get("gemini_model") or DEFAULT_GEMINI_MODEL
+        if chosen_model not in SUPPORTED_GEMINI_MODELS:
+            chosen_model = DEFAULT_GEMINI_MODEL
+
+        if not master_prompt_path or not os.path.exists(master_prompt_path):
+            return _fail(db, group, f"master_prompt 文件丢失: {master_prompt_path}")
+        if not video_path or not os.path.exists(video_path):
+            return _fail(db, group, f"样片视频文件丢失: {video_path}")
+
+        master_prompt = Path(master_prompt_path).read_text(encoding="utf-8")
+
+        api_key = settings.PACKYAPI_GEMINI_KEY
+        if not api_key:
+            return _fail(db, group, "PACKYAPI_GEMINI_KEY 未配置（.env 里加上）")
+
+        client = PackyGeminiClient(
+            api_key=api_key,
+            base_url=settings.PACKYAPI_BASE_URL,
+            default_model=chosen_model,
+        )
+
+        group.progress_message = f"Gemini 分析样片中（{chosen_model}）…"
+        db.commit()
+
+        result = asyncio.run(
+            client.run_storyboard(
+                master_prompt=master_prompt,
+                video_path=video_path,
+                product_image_paths=product_image_paths,
+                model=chosen_model,
+            )
+        )
+
+        if not result.success:
+            err = result.error or "Gemini 调用失败"
+            return _fail(db, group, f"LLM 调用失败：{err}", model_used=result.model_used)
+
+        # 落盘 LLM 原文
+        workdir = Path(master_prompt_path).parent
+        llm_output_path = workdir / "full_llm_output.md"
+        llm_output_path.write_text(result.text or "", encoding="utf-8")
+
+        # 解析 GU 并落盘
+        gus = parse_llm_output(result.text or "")
+        if not gus:
+            return _fail(
+                db,
+                group,
+                "LLM 输出未识别出任何 GU 块（缺 ═══【GU01/...】 标记）；可手动改用粘贴模式重试",
+                model_used=result.model_used,
+            )
+
+        gu_dir = Path(cfg.get("gu_output_dir") or (workdir / "gus"))
+        save_gus_to_dir(gus, gu_dir)
+
+        cfg.update({
+            "llm_output_path": str(llm_output_path).replace("\\", "/"),
+            "gu_output_dir": str(gu_dir).replace("\\", "/"),
+            "gu_count": len(gus),
+            "gemini_model_used": result.model_used,
+            "gemini_usage": {
+                "prompt_tokens": result.prompt_tokens,
+                "completion_tokens": result.completion_tokens,
+                "reasoning_tokens": result.reasoning_tokens,
+            },
+        })
+        group.config_json = cfg
+        group.total_count = len(gus)
+        group.status = GroupStatus.COMPLETED
+        group.progress_message = (
+            f"完成 · {len(gus)} GU · "
+            f"{result.prompt_tokens or 0} in / {result.completion_tokens or 0} out tokens"
+        )
+        db.commit()
+        logger.info(f"replicate auto: job {job_id} done, {len(gus)} GUs, model={result.model_used}")
+        return {
+            "ok": True,
+            "gu_count": len(gus),
+            "model": result.model_used,
+            "prompt_tokens": result.prompt_tokens,
+            "completion_tokens": result.completion_tokens,
+        }
+    except Exception as e:
+        logger.exception(f"replicate auto job {job_id} crashed")
+        try:
+            return _fail(db, group, f"任务崩溃：{type(e).__name__}: {e}")
+        except Exception:
+            return {"error": str(e)}
+    finally:
+        db.close()
+
+
+def _fail(db, group: TaskGroup, message: str, *, model_used: str | None = None) -> dict:
+    group.status = GroupStatus.FAILED
+    group.progress_message = message[:500]
+    if model_used:
+        cfg = dict(group.config_json or {})
+        cfg["gemini_model_used"] = model_used
+        group.config_json = cfg
+    db.commit()
+    logger.warning(f"replicate auto: job {group.id} failed: {message}")
+    return {"error": message}

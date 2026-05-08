@@ -55,7 +55,11 @@ class Settings(BaseSettings):
     # Grok2API (grok2api gateway service)
     GROK_API_URL: str = "http://localhost:8001"
     GROK_API_KEY: str = ""
-    
+
+    # PackyAPI (Gemini OpenAI-shape gateway, 用于 /replicate 自动模式)
+    PACKYAPI_BASE_URL: str = "https://www.packyapi.com"
+    PACKYAPI_GEMINI_KEY: str = ""
+
     MAX_RETRIES: int = 3
 
     @property

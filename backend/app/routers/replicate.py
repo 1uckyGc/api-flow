@@ -64,12 +64,18 @@ def _save_upload_to(file: UploadFile, dest: Path) -> Path:
 async def create_job(
     title: str = Form(...),
     brand: str = Form("{}"),                    # JSON 字符串
+    auto_mode: bool = Form(False),              # 勾选后自动调 Gemini 跑 LLM
+    gemini_model: str = Form(""),               # auto_mode 时使用，留空用默认
     sample_video: UploadFile = File(...),
     product_images: List[UploadFile] = File(default=[]),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """接受样片视频 + N 张商品参考图 + 品牌表单，生成 master_prompt 文件。"""
+    """接受样片视频 + N 张商品参考图 + 品牌表单，生成 master_prompt 文件。
+
+    auto_mode=True 时直接派 Celery 任务调 Gemini 跑 LLM，状态转 PROCESSING；
+    auto_mode=False 时（默认）状态转 AWAITING_LLM_INPUT，用户手动粘贴 LLM 输出。
+    """
     job_id = str(uuid.uuid4())
     workdir = _job_dir(job_id)
 
@@ -101,13 +107,16 @@ async def create_job(
 
     gu_dir = workdir / "gus"
 
+    initial_status = GroupStatus.PROCESSING if auto_mode else GroupStatus.AWAITING_LLM_INPUT
+    chosen_model = (gemini_model or "").strip() or None
+
     group = TaskGroup(
         id=job_id,
         user_id=current_user.id,
         title=title or "未命名复刻作业",
         task_type=TaskType.IMAGE_TO_VIDEO,
         source=TaskSource.STORYBOARD,
-        status=GroupStatus.AWAITING_LLM_INPUT,
+        status=initial_status,
         global_prompt=(brand_dict or {}).get("brand_name", "")[:200] if brand_dict else None,
         config_json={
             "video_path": str(video_path).replace("\\", "/"),
@@ -117,12 +126,19 @@ async def create_job(
             "gu_output_dir": str(gu_dir).replace("\\", "/"),
             "gu_count": 0,
             "llm_output_path": None,
+            "auto_mode": bool(auto_mode),
+            "gemini_model": chosen_model,
         },
+        progress_message="排队等待 Gemini 分析…" if auto_mode else None,
         total_count=0,
     )
     db.add(group)
     db.commit()
     db.refresh(group)
+
+    if auto_mode:
+        from app.workers.replicate_tasks import run_storyboard_llm
+        run_storyboard_llm.delay(job_id)
 
     return {
         "id": group.id,
@@ -131,6 +147,8 @@ async def create_job(
         "master_prompt": master_prompt_text,
         "video_path": group.config_json["video_path"],
         "product_image_paths": image_paths,
+        "auto_mode": bool(auto_mode),
+        "gemini_model": chosen_model,
         "created_at": group.created_at,
     }
 
@@ -159,6 +177,8 @@ def list_jobs(
             "title": g.title,
             "status": g.status.value if g.status else None,
             "gu_count": (g.config_json or {}).get("gu_count", 0),
+            "auto_mode": (g.config_json or {}).get("auto_mode", False),
+            "progress_message": g.progress_message,
             "created_at": g.created_at,
         }
         for g in rows
@@ -186,6 +206,11 @@ def get_job(
         "product_image_paths": cfg.get("product_image_paths", []),
         "brand_config": cfg.get("brand_config", {}),
         "master_prompt": master_prompt_text,
+        "auto_mode": cfg.get("auto_mode", False),
+        "gemini_model": cfg.get("gemini_model"),
+        "gemini_model_used": cfg.get("gemini_model_used"),
+        "gemini_usage": cfg.get("gemini_usage"),
+        "progress_message": group.progress_message,
         "created_at": group.created_at,
     }
 

@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Copy, Plus, Trash2 } from 'lucide-react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Copy, Plus, Trash2, Loader2, AlertCircle } from 'lucide-react';
 import * as api from '../../api/replicate';
 import InputForm from './InputForm';
 import AwaitingLLMOutput from './AwaitingLLMOutput';
@@ -10,7 +10,7 @@ const STATUS_LABEL = {
   completed: '已拆分 GU',
   failed: '失败',
   pending: '初始化中',
-  processing: '处理中',
+  processing: 'Gemini 分析中',
 };
 
 export default function ReplicatePage() {
@@ -51,6 +51,25 @@ export default function ReplicatePage() {
 
   useEffect(() => { refreshList(); }, [refreshList]);
   useEffect(() => { refreshActive(); }, [refreshActive]);
+
+  // PROCESSING 状态自动轮询（每 5s）
+  const pollRef = useRef(null);
+  useEffect(() => {
+    if (activeJob?.status !== 'processing') {
+      if (pollRef.current) clearInterval(pollRef.current);
+      pollRef.current = null;
+      return;
+    }
+    if (pollRef.current) return;
+    pollRef.current = setInterval(() => {
+      refreshActive();
+      refreshList();
+    }, 5000);
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+      pollRef.current = null;
+    };
+  }, [activeJob?.status, refreshActive, refreshList]);
 
   const handleCreate = async (formData) => {
     setCreating(true);
@@ -94,6 +113,33 @@ export default function ReplicatePage() {
     }
     if (activeJob.status === 'completed') {
       return <GUList job={activeJob} onChange={refreshActive} />;
+    }
+    if (activeJob.status === 'processing') {
+      return (
+        <div className="flex-1 flex flex-col items-center justify-center gap-4 px-8">
+          <Loader2 size={42} className="animate-spin" style={{ color: 'var(--accent)' }} />
+          <div className="text-base font-medium">Gemini 正在分析样片…</div>
+          <div className="text-xs text-center max-w-md" style={{ color: 'var(--text-tertiary)' }}>
+            {activeJob.progress_message || '正在调用模型，30-90 秒后自动出结果'}
+            <br />模型：{activeJob.gemini_model || activeJob.gemini_model_used || '默认'}
+          </div>
+        </div>
+      );
+    }
+    if (activeJob.status === 'failed') {
+      return (
+        <div className="flex-1 flex flex-col items-center justify-center gap-3 px-8">
+          <AlertCircle size={42} style={{ color: '#ef4444' }} />
+          <div className="text-base font-medium">作业失败</div>
+          <div className="text-xs text-center max-w-2xl px-4 py-3 rounded-lg whitespace-pre-wrap break-words"
+               style={{ background: '#7f1d1d22', color: '#fca5a5', border: '1px solid #7f1d1d' }}>
+            {activeJob.progress_message || '未知错误'}
+          </div>
+          <div className="text-xs" style={{ color: 'var(--text-tertiary)' }}>
+            可删除作业后重新提交，或在 LLM 模型下拉里换一个再试
+          </div>
+        </div>
+      );
     }
     return (
       <div className="flex-1 flex items-center justify-center" style={{ color: 'var(--text-tertiary)' }}>
