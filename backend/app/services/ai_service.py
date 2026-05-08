@@ -112,33 +112,12 @@ def _flow2api_key() -> str:
 
 class AIClient:
     def __init__(self):
-        # 不再缓存单一 base_url/api_key — 每次 _generate_* 按 provider 现取。
         # 老 self.api_key 留兼容（未传 api_key 时 _generate_holo/_flow2api 用各自 helper）。
         self.api_key = settings.AI_API_KEY
-        self._http_pool: httpx.AsyncClient | None = None
-        self._http_pool_loop_id: int | None = None
-
-    async def _get_client(self) -> httpx.AsyncClient:
-        current_loop = asyncio.get_running_loop()
-        current_loop_id = id(current_loop)
-        
-        # --- 核心修复：检查当前 Loop 是否与连接池绑定的一致 ---
-        # 如果当前没有池子，或者池子已经关闭，或者池子对应的 Loop 已销毁 (ID 不匹配)，则重建
-        if (self._http_pool is None or 
-            self._http_pool.is_closed or 
-            self._http_pool_loop_id != current_loop_id):
-            
-            if self._http_pool and not self._http_pool.is_closed:
-                logger.warning(f"检测到 Loop 漂移 (old:{self._http_pool_loop_id} -> new:{current_loop_id}), 正在销毁旧连接池。")
-                # 尽量优雅关闭旧池子，但不等待
-                asyncio.create_task(self._http_pool.aclose())
-            
-            # 创建新连接池并绑定当前 Loop ID
-            self._http_pool = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=30.0))
-            self._http_pool_loop_id = current_loop_id
-            logger.info(f"已为 Loop {current_loop_id} 创建全新的 httpx 连接池。")
-            
-        return self._http_pool
+        # ⚠ 不再缓存共享 httpx pool — celery threads 池下多 thread 各有自己的 loop，
+        # 共享 self._http_pool 会触发 race condition：A thread 的 client 被 B thread
+        # 的 "loop drift" 检测 aclose 掉，导致 "Cannot send a request" 报错。
+        # 现状：每个 _generate_* 调用 async with 自管 lifecycle（per-task 独立 client）。
 
     def _headers(self) -> dict:
         return {
@@ -268,10 +247,11 @@ class AIClient:
             "Content-Type": "application/json",
         }
 
+        # 每 task 自管 client lifecycle — 避免 threads 池下共享池被其它 thread aclose
+        client = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=30.0))
         try:
             messages = await self._build_messages(prompt, image_paths)
             payload = {"model": model, "messages": messages}
-            client = await self._get_client()
 
             # --- 1. SUBMIT ---
             if progress_callback:
@@ -417,6 +397,11 @@ class AIClient:
         except Exception as e:
             logger.error(f"HOLO generation failed: {e}")
             return GenerationResult(success=False, error=str(e))
+        finally:
+            try:
+                await client.aclose()
+            except Exception:
+                pass
 
     async def _generate_flow2api(self, model: str, prompt: str, image_paths: list[str] | None = None, progress_callback: Callable[[str], None] = None, api_key: str = None) -> GenerationResult:
         """Flow2API: OpenAI 兼容流式 SSE。"""
@@ -435,8 +420,9 @@ class AIClient:
             "Content-Type": "application/json",
         }
 
+        # 每 task 自管 client lifecycle — 避免 threads 池下共享池被其它 thread aclose
+        client = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=30.0))
         try:
-            client = await self._get_client()
             collected_content = ""
             async with client.stream("POST", url, json=payload, headers=headers) as response:
                 if response.status_code != 200:
@@ -538,10 +524,16 @@ class AIClient:
 
             result.data = collected_content.encode("utf-8")
             result.error = f"无法解析生成结果格式: {collected_content[:200]}"
-            
+            return result
+
         except Exception as e:
             logger.error(f"Image generation failed: {e}")
             return GenerationResult(success=False, error=str(e))
+        finally:
+            try:
+                await client.aclose()
+            except Exception:
+                pass
 
 # 全局单例
 ai_client = AIClient()
