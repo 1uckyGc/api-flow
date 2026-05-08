@@ -403,6 +403,15 @@ export default function ToolPanel() {
                       <option disabled>──── HOLO ────</option>
                       <option value="gemini-3.1-flash-image">Gemini 3.1 Flash — 迅速生图</option>
                       <option value="gemini-3.0-pro-image">Gemini 3.0 Pro — 高质量生图</option>
+                      <option disabled>──── HOLO · GPT-images2 ────</option>
+                      <option value="GPT-images2">GPT-images2 — 默认</option>
+                      <option value="GPT-images2 1:1">GPT-images2 — 方形 1:1</option>
+                      <option value="GPT-images2 1:1-2K">GPT-images2 — 方形 1:1 · 2K</option>
+                      <option value="GPT-images2 16:9-2K">GPT-images2 — 横屏 16:9 · 2K</option>
+                      <option value="GPT-images2 16:9-4K">GPT-images2 — 横屏 16:9 · 4K</option>
+                      <option value="GPT-images2 9:16-4K">GPT-images2 — 竖屏 9:16 · 4K</option>
+                      <option value="GPT-images2 2:3-2K">GPT-images2 — 2:3 · 2K</option>
+                      <option value="GPT-images2 3:2-2K">GPT-images2 — 3:2 · 2K</option>
                       <option disabled>──── Flow2API ────</option>
                       <option value="flow2api/gemini-3.1-flash-image-portrait">
                         Flow2API · Gemini 3.1 Flash 竖屏{path.includes('i2i') ? ' (R2I)' : ''}
