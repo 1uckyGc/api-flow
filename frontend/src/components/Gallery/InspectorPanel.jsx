@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Settings, CheckCircle, Loader, XCircle, Edit3, RefreshCw, Trash2 } from 'lucide-react';
 import useTaskStore from '../../stores/useTaskStore';
 import api from '../../api/client';
+import { copyToClipboard } from '../../utils/clipboard';
 
 export default function InspectorPanel({ groupDetail }) {
   const setActiveGroup = useTaskStore((s) => s.setActiveGroup);
@@ -144,7 +145,7 @@ export default function InspectorPanel({ groupDetail }) {
                 {t.prompt || '暂无文字提示，可能是全参考图硬解码。'}
                 <div className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity">
                    <button 
-                     onClick={() => navigator.clipboard.writeText(t.prompt)}
+                     onClick={() => copyToClipboard(t.prompt || '')}
                      className="rounded shadow-sm px-1.5 py-0.5 text-[10px]"
                      style={{ background: 'var(--surface-3)', border: '1px solid var(--border-default)', color: 'var(--text-tertiary)' }}
                    >复制</button>

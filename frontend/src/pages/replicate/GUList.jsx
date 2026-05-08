@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Copy, CheckCheck, ImageIcon, Film, Loader2, Settings } from 'lucide-react';
 import { listGUs, generateImage, generateVideo } from '../../api/replicate';
+import { copyToClipboard } from '../../utils/clipboard';
 
 const STATUS_LABEL = {
   queued: '排队中',
@@ -229,22 +230,22 @@ function PipelineColumn({ icon, label, prompt, taskState, onGenerate, mediaType,
   const [copiedJson, setCopiedJson] = useState(false);
 
   const copyPrompt = async () => {
-    try {
-      await navigator.clipboard.writeText(prompt || '');
+    const ok = await copyToClipboard(prompt || '');
+    if (ok) {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
-    } catch (e) {
-      alert('复制失败');
+    } else {
+      alert('复制失败（浏览器拒绝写入剪贴板）');
     }
   };
 
   const copyJson = async () => {
     if (!payload) return;
-    try {
-      await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+    const ok = await copyToClipboard(JSON.stringify(payload, null, 2));
+    if (ok) {
       setCopiedJson(true);
       setTimeout(() => setCopiedJson(false), 1500);
-    } catch (e) {
+    } else {
       alert('复制 JSON 失败');
     }
   };

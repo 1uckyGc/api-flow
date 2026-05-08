@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Copy, CheckCheck, Send } from 'lucide-react';
 import { submitLLMOutput } from '../../api/replicate';
+import { copyToClipboard } from '../../utils/clipboard';
 
 export default function AwaitingLLMOutput({ job, onSubmitted }) {
   const [llmOutput, setLLMOutput] = useState('');
@@ -8,11 +9,11 @@ export default function AwaitingLLMOutput({ job, onSubmitted }) {
   const [submitting, setSubmitting] = useState(false);
 
   const copyPrompt = async () => {
-    try {
-      await navigator.clipboard.writeText(job.master_prompt || '');
+    const ok = await copyToClipboard(job.master_prompt || '');
+    if (ok) {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-    } catch (e) {
+    } else {
       alert('复制失败，请手动选中复制');
     }
   };

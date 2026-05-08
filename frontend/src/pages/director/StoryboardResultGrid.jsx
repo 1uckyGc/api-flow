@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import api from '../../api/client';
 import useTaskStore from '../../stores/useTaskStore';
+import { copyToClipboard } from '../../utils/clipboard';
 import VideoMotionModal from './VideoMotionModal';
 import DirectorScenesEditor from './DirectorScenesEditor';
 
@@ -521,10 +522,12 @@ function VideoPreviewModal({ task, onClose }) {
   const videoSrc = task.output_file ? `/${task.output_file}` : null;
   const { title, cleanPrompt } = parseTaskPrompt(task.prompt);
 
-  const handleCopy = () => {
-    navigator.clipboard.writeText(cleanPrompt);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  const handleCopy = async () => {
+    const ok = await copyToClipboard(cleanPrompt || '');
+    if (ok) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
   };
 
   const handleDownload = () => {
@@ -662,10 +665,12 @@ function TaskInspectorModal({ task, onClose }) {
   const imgSrc = task.output_file ? `/${task.output_file}` : null;
   const { title, cleanPrompt } = parseTaskPrompt(task.prompt);
 
-  const handleCopy = () => {
-    navigator.clipboard.writeText(cleanPrompt);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  const handleCopy = async () => {
+    const ok = await copyToClipboard(cleanPrompt || '');
+    if (ok) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
   };
 
   return (
