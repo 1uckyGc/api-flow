@@ -461,7 +461,7 @@ Do not render the spoken dialogue text as visible text inside any panel.
   "gu_id": "GU{k}",
   "duration_sec": {gu_duration_sec},
   "aspect_ratio": "{aspect_ratio}",
-  "resolution": "1080p",
+  "resolution": "720p",
 
   "shot_continuity": {
     "mode": "{one_shot | multi_shot | hybrid}",

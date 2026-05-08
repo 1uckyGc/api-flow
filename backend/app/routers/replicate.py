@@ -444,6 +444,14 @@ def generate_video(
         or payload.get("resolution")
         or "720p"
     )
+    # 兼容性 guard：1080p 仅 seedance2.0_vip / seedance2.0fast_vip 支持，
+    # 其他 model_version 一律强制降到 720p（避免 dreamina 上游 fail）
+    if video_resolution != "720p" and "vip" not in (model_version or ""):
+        logger.info(
+            f"replicate gu={gu_id}: forcing video_resolution {video_resolution} → 720p "
+            f"(model_version={model_version} 不支持 1080p)"
+        )
+        video_resolution = "720p"
     # v3.2 没有顶层 prompt 字段 — Seedance 接受 B-zh 中文口语版作为最佳输入
     prompt_text = (
         req.prompt_override

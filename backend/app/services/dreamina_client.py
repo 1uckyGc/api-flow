@@ -149,21 +149,26 @@ class DreaminaClient:
             f"--model_version={model_version}",
             "--poll=0",
         ], timeout=300)
+
+        # 优先看 gen_status — 如果是 fail，直接拿 fail_reason 报上去（不要纠结 submit_id 为空）
+        gs = _extract_gen_status(out)
+        fail_reason = _extract_fail_reason(out)
+        if gs == "fail":
+            return DreaminaResult(
+                success=False, gen_status=gs,
+                fail_reason=fail_reason or "Dreamina submit 返回 gen_status=fail（无 fail_reason）",
+                raw_stdout_tail=out[-400:].strip(),
+            )
+
         sid = _extract_submit_id(out)
         if not sid:
             tail = out[-400:].strip()
+            # gen_status 不是 fail 但又没 submit_id —— 报告上行的 fail_reason 或原始尾部
+            msg = fail_reason or f"submit 未返回 submit_id (rc={rc}, gen_status={gs})"
             return DreaminaResult(
                 success=False,
-                fail_reason=f"submit failed (rc={rc}); could not parse submit_id. tail: {tail}",
+                fail_reason=f"{msg}. tail: {tail}",
                 raw_stdout_tail=tail,
-            )
-
-        gs = _extract_gen_status(out)
-        if gs == "fail":
-            return DreaminaResult(
-                success=False, submit_id=sid, gen_status=gs,
-                fail_reason=_extract_fail_reason(out) or "submit gen_status=fail",
-                raw_stdout_tail=out[-400:].strip(),
             )
 
         # 2) 轮询
