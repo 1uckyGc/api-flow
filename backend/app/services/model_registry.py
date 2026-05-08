@@ -16,11 +16,13 @@ FLOW2API_MODEL_KEYWORDS = (
     "_ultra",
 )
 
+# 注：HOLO 偶发改名（GPT-Images 2.0 → GPT-images2），所以下方匹配 case-insensitive
 HOLO_MODEL_PREFIXES = (
-    "GPT-Images",
+    "gpt-images",     # 覆盖 "GPT-Images 2.0" / "GPT-images2 1:1" / "gpt-images" 等大小写变体
     "gemini-3.",
     "imagen-",
     "veo_3_",
+    "sora-",
 )
 
 # 显式 provider 前缀（最高优先级，可消歧重名模型）：
@@ -50,9 +52,10 @@ def resolve_provider(model: str, fallback: str = "holo") -> str:
         if kw in m:
             return "flow2api"
 
-    # 4. HOLO 命名规则
+    # 4. HOLO 命名规则（case-insensitive — HOLO 模型名大小写不稳定）
+    m_lower = m.lower()
     for p in HOLO_MODEL_PREFIXES:
-        if m.startswith(p):
+        if m_lower.startswith(p):
             return "holo"
 
     return fallback or "holo"

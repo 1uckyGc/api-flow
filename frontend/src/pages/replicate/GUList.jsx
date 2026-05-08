@@ -51,7 +51,7 @@ export default function GUList({ job, onChange }) {
 
   const triggerImage = async (guId) => {
     try {
-      await generateImage(job.id, guId, { model: 'GPT-Images 2.0' });
+      await generateImage(job.id, guId, { model: 'GPT-images2 1:1' });
       fetchList();
     } catch (e) {
       alert(`出图失败：${e.response?.data?.detail || e.message}`);
@@ -115,10 +115,10 @@ function GUCard({ gu, onGenerateImage, onGenerateVideo }) {
       </div>
 
       <div className="grid grid-cols-2 divide-x" style={{ borderColor: 'var(--border-subtle)' }}>
-        {/* 产线 A — HOLO GPT-Images 2.0 */}
+        {/* 产线 A — HOLO GPT-images2 (1:1) */}
         <PipelineColumn
           icon={<ImageIcon size={14} />}
-          label="产线 A · 9宫格图（HOLO GPT-Images 2.0）"
+          label="产线 A · 9宫格图（HOLO GPT-images2 · 1:1）"
           prompt={gu.pipeline_a_image}
           taskState={gu.image_task}
           onGenerate={onGenerateImage}

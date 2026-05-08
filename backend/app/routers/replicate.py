@@ -331,8 +331,9 @@ def list_gus(
 # 5. Phase 3 — 一键调 HOLO 出图 / 出视频
 # ─────────────────────────────────────────────────────────────────────
 class GenerateImageRequest(BaseModel):
-    model: str = "GPT-Images 2.0"
-    aspect_ratio: Optional[str] = None      # 9宫格图建议默认 1:1
+    # 9 宫格图天然方形 — 用 HOLO 的 GPT-images2 1:1 变体
+    model: str = "GPT-images2 1:1"
+    aspect_ratio: Optional[str] = None
 
 
 class GenerateVideoRequest(BaseModel):

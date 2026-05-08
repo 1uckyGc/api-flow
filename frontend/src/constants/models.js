@@ -97,19 +97,23 @@ export const IMAGE_MODELS_BY_PROVIDER = {
       { value: 'gemini-3.1-flash-image-square', label: 'Gemini 3.1 Flash 方形' },
       { value: 'gemini-3.0-pro-image-portrait', label: 'Gemini 3.0 Pro 竖屏' },
       { value: 'gemini-3.0-pro-image-landscape', label: 'Gemini 3.0 Pro 横屏' },
-      { value: 'GPT-Images 2.0', label: 'GPT-Images 2.0 默认' },
-      { value: 'GPT-Images 2.0-1:1', label: 'GPT-Images 2.0 方形' },
-      { value: 'GPT-Images 2.0-16:9', label: 'GPT-Images 2.0 横屏' },
-      { value: 'GPT-Images 2.0-9:16', label: 'GPT-Images 2.0 竖屏' },
+      { value: 'GPT-images2', label: 'GPT-images2 默认' },
+      { value: 'GPT-images2 1:1', label: 'GPT-images2 方形 1:1' },
+      { value: 'GPT-images2 1:1-2K', label: 'GPT-images2 方形 1:1 2K' },
+      { value: 'GPT-images2 16:9-2K', label: 'GPT-images2 横屏 16:9 2K' },
+      { value: 'GPT-images2 16:9-4K', label: 'GPT-images2 横屏 16:9 4K' },
+      { value: 'GPT-images2 9:16-4K', label: 'GPT-images2 竖屏 9:16 4K' },
+      { value: 'GPT-images2 2:3-2K', label: 'GPT-images2 2:3 2K' },
+      { value: 'GPT-images2 3:2-2K', label: 'GPT-images2 3:2 2K' },
     ],
     i2i: [
       { value: 'gemini-3.1-flash-image-portrait', label: 'Gemini 3.1 Flash 竖屏 (R2I)' },
       { value: 'gemini-3.1-flash-image-landscape', label: 'Gemini 3.1 Flash 横屏 (R2I)' },
       { value: 'gemini-3.0-pro-image-portrait', label: 'Gemini 3.0 Pro 竖屏 (R2I)' },
       { value: 'gemini-3.0-pro-image-landscape', label: 'Gemini 3.0 Pro 横屏 (R2I)' },
-      { value: 'GPT-Images 2.0-1:1', label: 'GPT-Images 2.0 方形 (R2I)' },
-      { value: 'GPT-Images 2.0-16:9', label: 'GPT-Images 2.0 横屏 (R2I)' },
-      { value: 'GPT-Images 2.0-9:16', label: 'GPT-Images 2.0 竖屏 (R2I)' },
+      { value: 'GPT-images2 1:1', label: 'GPT-images2 方形 1:1 (R2I)' },
+      { value: 'GPT-images2 16:9-2K', label: 'GPT-images2 横屏 16:9 2K (R2I)' },
+      { value: 'GPT-images2 9:16-4K', label: 'GPT-images2 竖屏 9:16 4K (R2I)' },
     ],
   },
   flow2api: {
@@ -139,10 +143,14 @@ export function getImageModelsByProvider(provider, kind) {
       { value: 'gemini-3.1-flash-image-square', label: 'Gemini 3.1 Flash 方形' },
       { value: 'gemini-3.0-pro-image-portrait', label: 'Gemini 3.0 Pro 竖屏' },
       { value: 'gemini-3.0-pro-image-landscape', label: 'Gemini 3.0 Pro 横屏' },
-      { value: 'GPT-Images 2.0', label: 'GPT-Images 2.0 默认' },
-      { value: 'GPT-Images 2.0-1:1', label: 'GPT-Images 2.0 方形' },
-      { value: 'GPT-Images 2.0-16:9', label: 'GPT-Images 2.0 横屏' },
-      { value: 'GPT-Images 2.0-9:16', label: 'GPT-Images 2.0 竖屏' },
+      { value: 'GPT-images2', label: 'GPT-images2 默认' },
+      { value: 'GPT-images2 1:1', label: 'GPT-images2 方形 1:1' },
+      { value: 'GPT-images2 1:1-2K', label: 'GPT-images2 方形 1:1 2K' },
+      { value: 'GPT-images2 16:9-2K', label: 'GPT-images2 横屏 16:9 2K' },
+      { value: 'GPT-images2 16:9-4K', label: 'GPT-images2 横屏 16:9 4K' },
+      { value: 'GPT-images2 9:16-4K', label: 'GPT-images2 竖屏 9:16 4K' },
+      { value: 'GPT-images2 2:3-2K', label: 'GPT-images2 2:3 2K' },
+      { value: 'GPT-images2 3:2-2K', label: 'GPT-images2 3:2 2K' },
     ],
     flow2api: [
       { value: 'flow2api/gemini-3.1-flash-image-portrait', label: 'Flow2API · Gemini 3.1 Flash 竖屏' },
@@ -159,9 +167,9 @@ export function getImageModelsByProvider(provider, kind) {
       { value: 'gemini-3.1-flash-image-landscape', label: 'Gemini 3.1 Flash 横屏 (R2I)' },
       { value: 'gemini-3.0-pro-image-portrait', label: 'Gemini 3.0 Pro 竖屏 (R2I)' },
       { value: 'gemini-3.0-pro-image-landscape', label: 'Gemini 3.0 Pro 横屏 (R2I)' },
-      { value: 'GPT-Images 2.0-1:1', label: 'GPT-Images 2.0 方形 (R2I)' },
-      { value: 'GPT-Images 2.0-16:9', label: 'GPT-Images 2.0 横屏 (R2I)' },
-      { value: 'GPT-Images 2.0-9:16', label: 'GPT-Images 2.0 竖屏 (R2I)' },
+      { value: 'GPT-images2 1:1', label: 'GPT-images2 方形 1:1 (R2I)' },
+      { value: 'GPT-images2 16:9-2K', label: 'GPT-images2 横屏 16:9 2K (R2I)' },
+      { value: 'GPT-images2 9:16-4K', label: 'GPT-images2 竖屏 9:16 4K (R2I)' },
     ],
     flow2api: [],
     grok: [
@@ -198,7 +206,9 @@ export function providerOf(model) {
   // 2. 命名规则
   if (m.startsWith('grok-')) return 'grok';
   if (m.includes('_ultra')) return 'flow2api';
-  if (m.startsWith('GPT-Images') || m.startsWith('gemini-3.') || m.startsWith('imagen-') || m.startsWith('veo_3_')) return 'holo';
+  // HOLO 模型名大小写不稳，前缀比较走 lowercase
+  const ml = m.toLowerCase();
+  if (ml.startsWith('gpt-images') || ml.startsWith('gemini-3.') || ml.startsWith('imagen-') || ml.startsWith('veo_3_') || ml.startsWith('sora-')) return 'holo';
   return 'holo';  // 兜底
 }
 
