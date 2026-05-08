@@ -236,16 +236,22 @@ class AIClient:
     async def generate(self, model: str, prompt: str, image_paths: list[str] | None = None, progress_callback: Callable[[str], None] = None, api_key: str = None) -> GenerationResult:
         """统一入口；按模型名解析 provider，分发到 _generate_holo / _generate_flow2api。
         Grok 走外层 dispatcher（grok_client 需要 config_json，本类不持有），不在此处理。
+
+        速率锁按 provider 拆桶：
+          - HOLO：不强加本地速率（HOLO 上游 /v1/generate 自管 85 generators + 任务级 queued/position 排队）
+          - Flow2API：每 5s 一个槽位（自托管易触验证码，需要保护）
         """
         from app.utils.scheduler import wait_for_api_slot
         from app.services.model_registry import resolve_provider
 
-        await wait_for_api_slot(api_type="gemini_veo")
-
         provider = resolve_provider(model, getattr(settings, "AI_PROVIDER", "holo") or "holo")
+
         if provider == "flow2api":
+            # Flow2API 单 slot 5s 间隔（独立 key，与 HOLO 互不影响）
+            await wait_for_api_slot(api_type="flow2api", interval_base=5)
             return await self._generate_flow2api(model, prompt, image_paths, progress_callback, api_key)
-        # 默认/holo：未注册模型也走这条
+
+        # HOLO（含未注册模型兜底）：跳过本地速率，让 worker 真并发，HOLO 上游自动排队
         return await self._generate_holo(model, prompt, image_paths, progress_callback, api_key)
 
     async def _generate_holo(self, model: str, prompt: str, image_paths: list[str] | None = None, progress_callback: Callable[[str], None] = None, api_key: str = None) -> GenerationResult:
