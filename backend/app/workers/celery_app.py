@@ -30,7 +30,11 @@ celery_app.conf.update(
     beat_schedule={
         "purge-old-api-call-logs": {
             "task": "app.workers.cleanup_tasks.purge_old_logs",
-            "schedule": crontab(hour=3, minute=30),  # 每天凌晨 03:30
+            "schedule": crontab(hour=3, minute=30),  # 每天凌晨 03:30 — 30 天滚动清 ApiCallLog
+        },
+        "purge-old-artifacts": {
+            "task": "app.workers.cleanup_tasks.purge_old_artifacts",
+            "schedule": crontab(hour=4, minute=0),  # 每天凌晨 04:00 — 3 天滚动清任务/文件/前端记录
         },
     },
 )
