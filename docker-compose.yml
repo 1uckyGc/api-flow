@@ -70,6 +70,8 @@ services:
       - /app/__pycache__
       - /app/.pytest_cache
       - outputs_data:/app/outputs
+      # 即梦/Dreamina CLI 登录态持久化（OAuth Device Flow 一次性扫码后会话保存在这里）
+      - dreamina_session:/root/.dreamina_cli
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-followmeeeaigc}:${POSTGRES_PASSWORD:-followmeeeaigc_pass}@db:5432/${POSTGRES_DB:-followmeeeaigc_db}
       - CELERY_BROKER_URL=redis://redis:6379/0
@@ -97,3 +99,4 @@ volumes:
   postgres_data:
   redis_data:
   outputs_data:
+  dreamina_session:

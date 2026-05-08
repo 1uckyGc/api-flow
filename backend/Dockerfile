@@ -8,7 +8,15 @@ RUN apt-get update && apt-get install -y \
     libpq-dev \
     gcc \
     ffmpeg \
+    curl \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# 安装即梦 / Dreamina CLI（用于 /replicate 产线 B 视频生成）
+# 二进制装到 /root/.local/bin/dreamina；session 状态在 /root/.dreamina_cli/（用 docker volume 持久化）
+RUN curl -sL https://jimeng.jianying.com/cli | bash && \
+    /root/.local/bin/dreamina version 2>&1 | head -3
+ENV PATH="/root/.local/bin:${PATH}"
 
 COPY requirements.txt .
 RUN pip install --upgrade pip && \

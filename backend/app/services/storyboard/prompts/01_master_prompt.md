@@ -359,11 +359,30 @@ Total generated duration: {gu_duration_sec} seconds.
 
 (B8) NEGATIVE_PROMPT（原样英文输出）
 
+
+
 no character drift, no face morphing, no identity change between shots,
 no extra packaging, no extra accessories, no invented branding, no fake
 on-screen text, no fake prices, no fake subtitles, no excessive camera
 shake, no random spinning, no flicker, no extra people in frame
 {若样片只有1人}, {reverse_constraints 中的具体项也写进来}
+
+──────────────────────────────────────────────────
+(B9) DREAMINA_CLI_JSON（机读，必须严格按下方 schema 输出 ```json 块）
+──────────────────────────────────────────────────
+
+把 (B1)-(B6) 浓缩成一段 1-3 句的简洁英文 prompt（不要保留 "(B1)"、"Character:" 等结构标签），填进下方 JSON。`duration` 必须是整数 4-15。`ratio` 取 (B5) 的 aspect_ratio。
+
+```json
+{
+  "gu_id": "{gu_id_2digit}",
+  "model_version": "seedance2.0fast",
+  "duration": {gu_duration_sec_int},
+  "video_resolution": "720p",
+  "ratio": "{aspect_ratio}",
+  "prompt": "{1-3 句精炼英文 prompt}"
+}
+```
 
 ──────────────────────────────────────────────────
 (C) DIALOGUE_REFERENCE（台词时间轴）
@@ -382,7 +401,7 @@ shake, no random spinning, no flicker, no extra people in frame
 ──────────────────────────────────────────────────
 本GU共 {active} active + {merged} merged + {empty} empty
 | 含商品 {prod_count} 格 | 时间覆盖 {gu_start_sec}s-{gu_end_sec}s
-| 总时长 {gu_duration_sec}s | 产线A就绪✓ 产线B就绪✓
+| 总时长 {gu_duration_sec}s | 产线A就绪✓ 产线B就绪✓ (B9)JSON就绪✓
 
 ═══════════════════════════════════════════════════════════
 ```
@@ -437,32 +456,53 @@ shake, no random spinning, no flicker, no extra people in frame
 27. 每个 GU 的 panel 编号是否 1-9 全部出现？
 
 **I. Seedance 视频提示词（产线B）**
-28. 每个 GU 是否包含 (B1)~(B8) 全部8块？
+28. 每个 GU 是否包含 (B1)~(B9) 全部9块？
 29. (B3) MOTION 时间轴是否覆盖完整15秒？
 30. (B6) AUDIO 的台词是否原样抄录？
 31. (B7)(B8) 是否原样英文输出？
+32. (B9) JSON 是否每个 GU 都有，字段齐全（gu_id/model_version/duration/video_resolution/ratio/prompt）且 prompt 已浓缩成 1-3 句？
 
 **J. 反偷懒检查**
-32. 输出3 N×9 行是否全部独立列出，无 "..." / "同上" / "类推"？
-33. 输出4 是否每个 GU 都独立完整输出 (A1)~(D)？
-34. 是否存在"模板+替换提示"形式？（必须否）
-35. Shot 表每个 Shot 是否填全35列？
+33. 输出3 N×9 行是否全部独立列出，无 "..." / "同上" / "类推"？
+34. 输出4 是否每个 GU 都独立完整输出 (A1)~(D)？
+35. 是否存在"模板+替换提示"形式？（必须否）
+
+---
+
+## 阶段 7 · 输出6：CLI_PAYLOAD 机读汇总（必须输出）
+
+完成全部 GU 后，把每个 GU 的 (B9) JSON 按 gu_id 升序原样收集到下方分隔符之间，作为机读交付物：
+
+===CLI_PAYLOAD===
+```json
+[
+  { ...GU 01 的 (B9) JSON 原样... },
+  { ...GU 02 的 (B9) JSON 原样... }
+]
+```
+===CLI_PAYLOAD_END===
+
+注意：
+- JSON 数组里每个对象必须**与对应 GU 的 (B9) JSON 完全一致**（字段顺序也保持一致以便对账）
+- 数组顺序严格按 gu_id 升序（"01" → "02" → ...）
+- 不要添加 (B9) 之外的额外字段
 
 ---
 
 # 启动指令
 
-请按上述6阶段顺序严格执行。中途若上下文不够，必须明确告知"已输出至 GUₖ，请回复继续"。
+请按上述7阶段顺序严格执行。中途若上下文不够，必须明确告知"已输出至 GUₖ，请回复继续"。
 
 最终交付物清单：
 1. 时长锁定声明 + 全片设定卡 + **人物文字锁**
 2. 输出1：逐句脚本证据表
 3. 输出2：分镜头逆向主表（35列）
 4. 输出3：15秒9宫格映射表（N×9行）
-5. 输出4：双产线提示词包（N 个 GU 完整结构）
+5. 输出4：双产线提示词包（N 个 GU 完整结构，含 (B9) JSON）
 6. 输出5：35条自检清单
+7. 输出6：CLI_PAYLOAD 机读 JSON 汇总（=== 包裹）
 
-执行完毕请输出：「【9宫格双产线复刻 v3.0 完成】N={N}，人物锁✓ 商品锁✓ 产线A✓ 产线B✓」
+执行完毕请输出：「【9宫格双产线复刻 v3.0 完成】N={N}，人物锁✓ 商品锁✓ 产线A✓ 产线B✓ CLI_PAYLOAD✓」
 
 ---
 

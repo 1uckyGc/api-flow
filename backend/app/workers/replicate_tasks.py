@@ -13,10 +13,12 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
+from typing import Optional
 
 from app.config import settings
 from app.database import SessionLocal
-from app.models.task import GroupStatus, TaskGroup, TaskSource
+from app.models.task import GroupStatus, Task, TaskGroup, TaskSource, TaskStatus
+from app.services.dreamina_client import DreaminaClient, move_to_outputs
 from app.services.packy_gemini import (
     DEFAULT_GEMINI_MODEL,
     PackyGeminiClient,
@@ -148,4 +150,93 @@ def _fail(db, group: TaskGroup, message: str, *, model_used: str | None = None) 
         group.config_json = cfg
     db.commit()
     logger.warning(f"replicate auto: job {group.id} failed: {message}")
+    return {"error": message}
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 产线 B 视频生成（即梦 / Dreamina CLI subprocess）
+# ─────────────────────────────────────────────────────────────────────
+@celery_app.task(name="app.workers.replicate_tasks.run_video_via_dreamina", bind=True)
+def run_video_via_dreamina(self, task_id: str) -> dict:
+    """对一个 storyboard pipeline B 子任务，调 dreamina CLI 出 15s 视频。
+
+    Task 是由 router.generate_video 创建的（status=QUEUED），config_json 形如:
+      {gu_id, kind="video", model_version, duration, video_resolution, ratio, prompt}
+    input_files[0] 是用作 i2v 输入的图片（产品参考图或 GU 已生成的 9宫格图）。
+    """
+    db = SessionLocal()
+    try:
+        task: Optional[Task] = db.query(Task).filter(Task.id == task_id).first()
+        if not task:
+            logger.error(f"dreamina task {task_id} not found")
+            return {"error": "task not found"}
+
+        cfg = dict(task.config_json or {})
+        prompt = task.prompt or ""
+        if not prompt.strip():
+            return _fail_task(db, task, "prompt 为空")
+
+        inputs = task.input_files or []
+        if not inputs or not isinstance(inputs, list) or not inputs[0]:
+            return _fail_task(db, task, "无输入图（input_files 为空）")
+
+        image_path = inputs[0]
+        if not image_path.startswith(("/", "C:", "D:", "E:")) and not Path(image_path).is_absolute():
+            # 相对路径转绝对（worker 工作目录是 /app）
+            image_path = str(Path("/app") / image_path)
+        if not Path(image_path).exists():
+            return _fail_task(db, task, f"输入图文件不存在: {image_path}")
+
+        task.status = TaskStatus.RUNNING
+        db.commit()
+
+        cli = DreaminaClient()
+        if not cli.is_logged_in():
+            return _fail_task(db, task, "Dreamina CLI 未登录。运维需 SSH 进 worker 容器跑 `dreamina login --headless` 一次")
+
+        result = cli.image2video(
+            image_path=image_path,
+            prompt=prompt,
+            model_version=cfg.get("model_version", "seedance2.0fast"),
+            duration=int(cfg.get("duration", 15)),
+            video_resolution=cfg.get("video_resolution", "720p"),
+            max_wait_sec=int(cfg.get("max_wait_sec", 600)),
+            poll_interval=int(cfg.get("poll_interval", 8)),
+        )
+
+        if not result.success:
+            err = (result.fail_reason or "dreamina 调用失败")[:500]
+            return _fail_task(db, task, err)
+
+        # 把临时 dreamina mp4 移到 outputs/<uuid>.mp4
+        moved = move_to_outputs(result.local_video_path) if result.local_video_path else None
+        task.output_file = moved
+        task.status = TaskStatus.SUCCESS
+        # 把 submit_id / poll_count 写进 config_json，前端可读
+        cfg.update({
+            "dreamina_submit_id": result.submit_id,
+            "dreamina_polls": result.poll_count,
+        })
+        task.config_json = cfg
+        db.commit()
+        logger.info(f"dreamina task {task_id} success, submit_id={result.submit_id}, file={moved}")
+        return {"ok": True, "submit_id": result.submit_id, "file": moved, "polls": result.poll_count}
+    except Exception as e:
+        logger.exception(f"dreamina task {task_id} crashed")
+        try:
+            task = db.query(Task).filter(Task.id == task_id).first()
+            return _fail_task(db, task, f"任务崩溃：{type(e).__name__}: {e}") if task else {"error": str(e)}
+        except Exception:
+            return {"error": str(e)}
+    finally:
+        db.close()
+
+
+def _fail_task(db, task: Task, message: str) -> dict:
+    if task is None:
+        return {"error": message}
+    task.status = TaskStatus.FAILED
+    task.error_message = message[:500]
+    db.commit()
+    logger.warning(f"dreamina task {task.id} failed: {message}")
     return {"error": message}

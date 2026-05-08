@@ -58,9 +58,13 @@ export default function GUList({ job, onChange }) {
     }
   };
 
-  const triggerVideo = async (guId) => {
+  const triggerVideo = async (guId, gu) => {
+    // 后端默认会用 GU 的 (B9) cli_payload，前端不需要传额外字段；
+    // 如果 LLM 没产 cli_payload，传 model_version 兜底。
+    const payload = {};
+    if (!gu?.cli_payload) payload.model_version = 'seedance2.0fast';
     try {
-      await generateVideo(job.id, guId, { model: 'veo_3_1_i2v_s_fast_portrait_ultra_fl' });
+      await generateVideo(job.id, guId, payload);
       fetchList();
     } catch (e) {
       alert(`出视频失败：${e.response?.data?.detail || e.message}`);
@@ -93,7 +97,7 @@ export default function GUList({ job, onChange }) {
               key={gu.gu_id}
               gu={gu}
               onGenerateImage={() => triggerImage(gu.gu_id)}
-              onGenerateVideo={() => triggerVideo(gu.gu_id)}
+              onGenerateVideo={() => triggerVideo(gu.gu_id, gu)}
             />
           ))}
         </div>
@@ -124,23 +128,24 @@ function GUCard({ gu, onGenerateImage, onGenerateVideo }) {
           onGenerate={onGenerateImage}
           mediaType="image"
         />
-        {/* 产线 B — 暂未开通，按钮 disabled，仍展示提示词 + 复制 */}
+        {/* 产线 B — Dreamina seedance2.0 fast */}
         <PipelineColumn
           icon={<Film size={14} />}
-          label="产线 B · 15秒视频（暂未开通）"
+          label="产线 B · 15秒视频（即梦 seedance2.0 fast）"
           prompt={gu.pipeline_b_video}
           taskState={gu.video_task}
           onGenerate={onGenerateVideo}
           mediaType="video"
-          disabled={true}
+          payload={gu.cli_payload}
         />
       </div>
     </div>
   );
 }
 
-function PipelineColumn({ icon, label, prompt, taskState, onGenerate, mediaType, disabled = false }) {
+function PipelineColumn({ icon, label, prompt, taskState, onGenerate, mediaType, payload = null }) {
   const [copied, setCopied] = useState(false);
+  const [copiedJson, setCopiedJson] = useState(false);
 
   const copyPrompt = async () => {
     try {
@@ -149,6 +154,17 @@ function PipelineColumn({ icon, label, prompt, taskState, onGenerate, mediaType,
       setTimeout(() => setCopied(false), 1500);
     } catch (e) {
       alert('复制失败');
+    }
+  };
+
+  const copyJson = async () => {
+    if (!payload) return;
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+      setCopiedJson(true);
+      setTimeout(() => setCopiedJson(false), 1500);
+    } catch (e) {
+      alert('复制 JSON 失败');
     }
   };
 
@@ -162,15 +178,28 @@ function PipelineColumn({ icon, label, prompt, taskState, onGenerate, mediaType,
         <span className="text-xs font-medium flex items-center gap-1.5" style={{ color: 'var(--text-secondary)' }}>
           {icon}{label}
         </span>
-        <button
-          onClick={copyPrompt}
-          disabled={!prompt}
-          className="px-2 py-0.5 rounded text-[10px] flex items-center gap-1"
-          style={{ background: copied ? 'var(--accent-subtle)' : 'var(--surface-2)', color: copied ? 'var(--accent)' : 'var(--text-secondary)' }}
-        >
-          {copied ? <CheckCheck size={11} /> : <Copy size={11} />}
-          {copied ? '已复制' : '复制'}
-        </button>
+        <div className="flex items-center gap-1">
+          {payload && (
+            <button
+              onClick={copyJson}
+              className="px-2 py-0.5 rounded text-[10px] flex items-center gap-1"
+              style={{ background: copiedJson ? 'var(--accent-subtle)' : 'var(--surface-2)', color: copiedJson ? 'var(--accent)' : 'var(--text-secondary)' }}
+              title="复制 (B9) Dreamina CLI JSON"
+            >
+              {copiedJson ? <CheckCheck size={11} /> : <Copy size={11} />}
+              {copiedJson ? '已复制 JSON' : 'JSON'}
+            </button>
+          )}
+          <button
+            onClick={copyPrompt}
+            disabled={!prompt}
+            className="px-2 py-0.5 rounded text-[10px] flex items-center gap-1"
+            style={{ background: copied ? 'var(--accent-subtle)' : 'var(--surface-2)', color: copied ? 'var(--accent)' : 'var(--text-secondary)' }}
+          >
+            {copied ? <CheckCheck size={11} /> : <Copy size={11} />}
+            {copied ? '已复制' : '复制'}
+          </button>
+        </div>
       </div>
 
       <pre className="flex-1 overflow-auto px-3 py-2 text-[11px] whitespace-pre-wrap font-mono leading-snug max-h-44"
@@ -196,24 +225,20 @@ function PipelineColumn({ icon, label, prompt, taskState, onGenerate, mediaType,
         )}
         <button
           onClick={onGenerate}
-          disabled={disabled || inflight || !prompt}
+          disabled={inflight || !prompt}
           className="w-full px-2 py-1.5 rounded text-xs flex items-center justify-center gap-1.5 transition"
           style={{
-            background: disabled ? 'var(--surface-3)' : (inflight ? 'var(--surface-3)' : (succeeded ? 'var(--surface-2)' : 'var(--accent)')),
-            color: disabled ? 'var(--text-tertiary)' : (inflight ? 'var(--text-tertiary)' : (succeeded ? 'var(--text-secondary)' : '#fff')),
-            cursor: (disabled || inflight || !prompt) ? 'not-allowed' : 'pointer',
-            opacity: disabled ? 0.55 : 1,
+            background: inflight ? 'var(--surface-3)' : (succeeded ? 'var(--surface-2)' : 'var(--accent)'),
+            color: inflight ? 'var(--text-tertiary)' : (succeeded ? 'var(--text-secondary)' : '#fff'),
+            cursor: (inflight || !prompt) ? 'not-allowed' : 'pointer',
           }}
-          title={disabled ? '产线 B 暂未开通，仅展示提示词供复制使用' : undefined}
         >
           {inflight && <Loader2 size={12} className="animate-spin" />}
-          {disabled
-            ? '暂未开通（可复制提示词）'
-            : inflight
-              ? STATUS_LABEL[taskState?.status] || '处理中'
-              : succeeded
-                ? '重新生成'
-                : (mediaType === 'image' ? '一键出图' : '一键出视频')}
+          {inflight
+            ? STATUS_LABEL[taskState?.status] || '处理中'
+            : succeeded
+              ? '重新生成'
+              : (mediaType === 'image' ? '一键出图' : '一键出视频')}
         </button>
       </div>
     </div>

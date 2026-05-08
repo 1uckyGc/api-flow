@@ -321,6 +321,7 @@ def list_gus(
             "gu_id": gid,
             "pipeline_a_image": gu.get("pipeline_a_image"),
             "pipeline_b_video": gu.get("pipeline_b_video"),
+            "cli_payload": gu.get("cli_payload"),
             "image_task": (by_gu.get(gid) or {}).get("image"),
             "video_task": (by_gu.get(gid) or {}).get("video"),
         })
@@ -337,8 +338,12 @@ class GenerateImageRequest(BaseModel):
 
 
 class GenerateVideoRequest(BaseModel):
-    model: str = "veo_3_1_i2v_s_fast_portrait_ultra_fl"
-    image_path: Optional[str] = None        # 默认用对应 GU 的 9宫格图
+    """产线 B 视频生成 — 走 Dreamina CLI（即梦），seedance2.0fast 默认。"""
+    model_version: str = "seedance2.0fast"   # 也接 seedance2.0 / seedance2.0_vip / seedance2.0fast_vip
+    duration: Optional[int] = None           # 不传 → 用 LLM 输出的 cli_payload.duration
+    video_resolution: Optional[str] = None   # 不传 → 用 cli_payload.video_resolution（默认 720p）
+    image_path: Optional[str] = None         # 不传 → 默认第一张商品参考图
+    prompt_override: Optional[str] = None    # 不传 → 用 LLM 输出的 cli_payload.prompt
 
 
 @router.post("/jobs/{job_id}/gus/{gu_id}/generate-image")
@@ -402,6 +407,11 @@ def generate_video(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    """产线 B：调 Dreamina CLI（seedance2.0 fast 默认）。
+
+    优先用 LLM 在 (B9) 里给出的 cli_payload（model_version/duration/resolution/prompt）；
+    用户在请求里显式传的字段会覆盖 cli_payload。
+    """
     group = _load_job(db, job_id, current_user)
     cfg = group.config_json or {}
     if not cfg.get("llm_output_path"):
@@ -415,18 +425,24 @@ def generate_video(
     if not gu.get("pipeline_b_video"):
         raise HTTPException(400, f"GU {gu_id} 没有 [产线 B] 提示词，无法出视频")
 
+    # cli_payload 优先 → req 覆盖
+    payload = gu.get("cli_payload") or {}
+    model_version = req.model_version or payload.get("model_version") or "seedance2.0fast"
+    duration = req.duration if req.duration is not None else payload.get("duration", 15)
+    video_resolution = req.video_resolution or payload.get("video_resolution") or "720p"
+    prompt_text = (req.prompt_override or payload.get("prompt") or gu["pipeline_b_video"]).strip()
+    if not prompt_text:
+        raise HTTPException(400, f"GU {gu_id} 没有可用的 prompt（B9 缺失且 pipeline_b_video 为空）")
+
     # 视频 input：优先用本 GU 已经生成的图，其次用 req.image_path，最后回退到第一张商品图
     image_path = req.image_path
     if not image_path:
-        prior_image = (
+        prior_images = (
             db.query(Task)
-            .filter(
-                Task.group_id == job_id,
-                Task.status == TaskStatus.SUCCESS,
-            )
+            .filter(Task.group_id == job_id, Task.status == TaskStatus.SUCCESS)
             .all()
         )
-        for t in prior_image:
+        for t in prior_images:
             cfg_t = t.config_json or {}
             if cfg_t.get("gu_id") == gu_id and cfg_t.get("kind") == "image" and t.output_file:
                 image_path = t.output_file
@@ -442,12 +458,15 @@ def generate_video(
         id=str(uuid.uuid4()),
         group_id=job_id,
         user_id=current_user.id,
-        prompt=gu["pipeline_b_video"],
+        prompt=prompt_text,
         input_files=[image_path],
         config_json={
             "gu_id": gu_id,
             "kind": "video",
-            "model": req.model,
+            "provider": "dreamina",
+            "model_version": model_version,
+            "duration": int(duration),
+            "video_resolution": video_resolution,
         },
         status=TaskStatus.QUEUED,
     )
@@ -455,13 +474,16 @@ def generate_video(
     db.commit()
     db.refresh(task)
 
-    from app.workers.tasks import process_generation
-    process_generation.delay(task.id)
+    from app.workers.replicate_tasks import run_video_via_dreamina
+    run_video_via_dreamina.delay(task.id)
 
     return {
         "task_id": task.id,
         "gu_id": gu_id,
         "kind": "video",
+        "provider": "dreamina",
+        "model_version": model_version,
+        "duration": int(duration),
         "status": task.status.value,
     }
 
