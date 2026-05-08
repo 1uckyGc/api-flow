@@ -426,13 +426,34 @@ def generate_video(
         raise HTTPException(400, f"GU {gu_id} 没有 [产线 B] 提示词，无法出视频")
 
     # cli_payload 优先 → req 覆盖
+    # 字段兼容 v3.2 (duration_sec) / v3.1 (duration)；prompt 优先级：req.override > B-zh 文本 > legacy payload.prompt > pipeline_b_video
     payload = gu.get("cli_payload") or {}
     model_version = req.model_version or payload.get("model_version") or "seedance2.0fast"
-    duration = req.duration if req.duration is not None else payload.get("duration", 15)
-    video_resolution = req.video_resolution or payload.get("video_resolution") or "720p"
-    prompt_text = (req.prompt_override or payload.get("prompt") or gu["pipeline_b_video"]).strip()
+    if req.duration is not None:
+        duration = req.duration
+    elif "duration_sec" in payload:
+        duration = payload["duration_sec"]
+    elif "duration" in payload:
+        duration = payload["duration"]
+    else:
+        duration = 15
+    # v3.2: aspect_ratio + resolution；v3.1: video_resolution
+    video_resolution = (
+        req.video_resolution
+        or payload.get("video_resolution")
+        or payload.get("resolution")
+        or "720p"
+    )
+    # v3.2 没有顶层 prompt 字段 — Seedance 接受 B-zh 中文口语版作为最佳输入
+    prompt_text = (
+        req.prompt_override
+        or gu.get("pipeline_b_zh")
+        or payload.get("prompt")
+        or gu.get("pipeline_b_video")
+        or ""
+    ).strip()
     if not prompt_text:
-        raise HTTPException(400, f"GU {gu_id} 没有可用的 prompt（B9 缺失且 pipeline_b_video 为空）")
+        raise HTTPException(400, f"GU {gu_id} 没有可用的 prompt（B-zh / B-json / 旧版 B 段均缺失）")
 
     # 视频 input：优先用本 GU 已经生成的图，其次用 req.image_path，最后回退到第一张商品图
     image_path = req.image_path

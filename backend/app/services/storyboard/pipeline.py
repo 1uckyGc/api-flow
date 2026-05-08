@@ -1,16 +1,20 @@
 """
 Storyboard 复刻引擎 — pipeline 核心函数。
 
-从用户工程 storyboard_engine_v3 的 scripts/run_pipeline.py 提取出来，
+从用户工程 storyboard_engine_v3.2 的 scripts/run_pipeline.py 提取出来，
 转成 Web 集成友好的 importable 接口（不依赖 argparse / sys.path / 文件系统副作用）。
 
 核心函数：
 - render_master_prompt(brand_config_block) → 渲染主提示词文本
-- parse_llm_output(llm_output) → 拆出 N 个 GU 的双产线提示词包 + (B9) Dreamina CLI JSON
-- extract_summary_cli_payload(llm_output) → 抽末尾 ===CLI_PAYLOAD=== 包裹的汇总 JSON 数组
+- parse_llm_output(llm_output) → 拆出 N 个 GU 的三段产线（A / B-zh / B-json），
+  并把 [B-json] 解析后挂到 cli_payload 字段
+- extract_summary_cli_payload(llm_output) → 兼容旧 v3.1 模板的 ===CLI_PAYLOAD=== 末尾汇总
 
-dual-output 模板（v3.1 升级，2026-05）：每个 GU 多一段 (B9) ```json``` 块用于 Dreamina CLI；
-末尾再来一段 ===CLI_PAYLOAD=== 汇总，前后端解析时优先 trust 末尾的 summary（更不易被 LLM 偷懒漏字段）。
+模板版本兼容矩阵：
+- v3.0：仅 [产线 A] / [产线 B] —— 无 cli_payload，dreamina 调用回退用 B 文本作为 prompt
+- v3.1：旧版扩展，[产线 B] 内有 (B9) ```json``` + 末尾 ===CLI_PAYLOAD=== 汇总
+- v3.2：[产线 A] / [产线 B-zh] / [产线 B-json] 三段（当前），
+  [B-json] 含 duration_sec / shot_continuity / camera_motion / motion_timeline 等富字段
 """
 import json
 import re
@@ -78,20 +82,40 @@ def build_brand_config_block(brand: Optional[dict]) -> Optional[str]:
 # ─────────────────────────────────────────────────────────────────────
 # 2. 解析 LLM 输出 → GU 列表
 # ─────────────────────────────────────────────────────────────────────
-GU_SPLIT_PATTERN = re.compile(r"(?=═+\s*【GU\d+\s*/)")
-GU_ID_PATTERN = re.compile(r"【GU(\d+)\s*/")
-PIPELINE_A_PATTERN = re.compile(r"\[产线\s*A\].*?(?=\[产线\s*B\])", re.DOTALL)
-PIPELINE_B_PATTERN = re.compile(
-    # B 段一直延伸到 (B9) / (C) / 下一个 GU / 文末，保留 (B9) 块在 pipeline_b_video 文本里
-    r"\[产线\s*B\].*?(?=──+\s*\(C\)|═+\s*【GU\d+\s*/|$)",
+GU_SPLIT_PATTERN = re.compile(r"(?=═+\s*【GU\d+\s*[/／])")
+GU_ID_PATTERN = re.compile(r"【GU(\d+)\s*[/／]")
+
+# 产线段落起点：v3.2 是 `[产线 A]` / `[产线 B-zh]` / `[产线 B-json]`；
+# v3.0/3.1 是 `[产线 A]` / `[产线 B]`（统一抓取）
+PIPELINE_A_PATTERN = re.compile(
+    r"\[产线\s*A\].*?(?=\[产线\s*B(-zh|-json)?\b|$)",
     re.DOTALL,
 )
-# (B9) JSON 块：```json {...} ``` —— 在每个 GU block 内匹配
+# 单一 [产线 B]（v3.0/3.1）— 包含 (B1)-(B9)
+PIPELINE_B_LEGACY_PATTERN = re.compile(
+    r"\[产线\s*B\]\s*(?!-).*?(?=──+\s*\(C\)|═+\s*【GU\d+\s*[/／]|$)",
+    re.DOTALL,
+)
+# v3.2 新增：[产线 B-zh] 中文口语版
+PIPELINE_B_ZH_PATTERN = re.compile(
+    r"\[产线\s*B-zh\].*?(?=\[产线\s*B-json\]|═+\s*【GU\d+\s*[/／]|$)",
+    re.DOTALL,
+)
+# v3.2 新增：[产线 B-json] JSON 参数包
+PIPELINE_B_JSON_PATTERN = re.compile(
+    r"\[产线\s*B-json\].*?(?=──+\s*\(C\)|═+\s*【GU\d+\s*[/／]|$)",
+    re.DOTALL,
+)
+# (B9) JSON 块：旧 v3.1 扩展模板用 (B9) DREAMINA_CLI_JSON ```json``` 形态
 B9_JSON_PATTERN = re.compile(
     r"\(B9\)[\s\S]*?```json\s*(\{[\s\S]*?\})\s*```",
     re.IGNORECASE,
 )
-# 末尾汇总：===CLI_PAYLOAD=== ... ===CLI_PAYLOAD_END===
+# v3.2：`[产线 B-json]` 之后的第一个 ```json``` 块
+BJSON_BLOCK_PATTERN = re.compile(
+    r"```json\s*(\{[\s\S]*?\})\s*```",
+)
+# 末尾汇总：===CLI_PAYLOAD=== ... ===CLI_PAYLOAD_END=== （仅旧 v3.1 扩展模板有）
 SUMMARY_CLI_PAYLOAD_PATTERN = re.compile(
     r"===\s*CLI_PAYLOAD\s*===\s*(?:```(?:json)?\s*)?([\s\S]*?)(?:\s*```)?\s*===\s*CLI_PAYLOAD_END\s*===",
     re.IGNORECASE,
@@ -157,33 +181,57 @@ def parse_llm_output(llm_output: str) -> list[dict]:
         gu_id = m.group(1).zfill(2)
 
         a_match = PIPELINE_A_PATTERN.search(block)
-        b_match = PIPELINE_B_PATTERN.search(block)
+        b_zh_match = PIPELINE_B_ZH_PATTERN.search(block)
+        b_json_match = PIPELINE_B_JSON_PATTERN.search(block)
+        b_legacy_match = PIPELINE_B_LEGACY_PATTERN.search(block) if not (b_zh_match or b_json_match) else None
 
-        # inline (B9) JSON
+        # 整段 pipeline_b_video — v3.2 把 B-zh + B-json 文本拼起来供前端复制；
+        # v3.0/3.1 退化用 PIPELINE_B_LEGACY_PATTERN
+        if b_zh_match or b_json_match:
+            parts = []
+            if b_zh_match:
+                parts.append(b_zh_match.group(0).strip())
+            if b_json_match:
+                parts.append(b_json_match.group(0).strip())
+            pipeline_b_video = "\n\n".join(parts) if parts else None
+        elif b_legacy_match:
+            pipeline_b_video = b_legacy_match.group(0).strip()
+        else:
+            pipeline_b_video = None
+
+        # cli_payload 解析顺序：v3.2 [B-json] block → v3.1 (B9) → 末尾汇总（v3.1 only）
         cli_payload: Optional[dict] = None
-        b9 = B9_JSON_PATTERN.search(block)
-        if b9:
-            parsed = _safe_parse_json(b9.group(1))
-            if isinstance(parsed, dict):
-                cli_payload = parsed
-
-        # summary override（汇总通常更可靠，覆盖 inline）
+        if b_json_match:
+            bjm = BJSON_BLOCK_PATTERN.search(b_json_match.group(0))
+            if bjm:
+                parsed = _safe_parse_json(bjm.group(1))
+                if isinstance(parsed, dict):
+                    cli_payload = parsed
+        if cli_payload is None:
+            b9 = B9_JSON_PATTERN.search(block)
+            if b9:
+                parsed = _safe_parse_json(b9.group(1))
+                if isinstance(parsed, dict):
+                    cli_payload = parsed
         if gu_id in summary_by_id:
-            cli_payload = summary_by_id[gu_id]
+            # 汇总只在 v3.1 扩展模板里出现，覆盖 inline (B9) 但不覆盖 v3.2 的 [B-json]
+            if cli_payload is None or "duration_sec" not in cli_payload:
+                cli_payload = summary_by_id[gu_id]
 
-        # 兜底：补全缺失字段
+        # 兜底字段（无论哪个版本，确保 dreamina 能至少跑起来）
         if cli_payload is not None:
-            cli_payload.setdefault("gu_id", gu_id)
-            cli_payload.setdefault("model_version", "seedance2.0fast")
-            cli_payload.setdefault("duration", 15)
-            cli_payload.setdefault("video_resolution", "720p")
-            cli_payload.setdefault("ratio", "9:16")
+            cli_payload.setdefault("gu_id", f"GU{gu_id}")
+            # v3.2 的 duration_sec / v3.1 的 duration / 兜底 15
+            if "duration_sec" not in cli_payload and "duration" not in cli_payload:
+                cli_payload["duration_sec"] = 15
 
         result.append({
             "gu_id": gu_id,
             "full": block.strip(),
             "pipeline_a_image": a_match.group(0).strip() if a_match else None,
-            "pipeline_b_video": b_match.group(0).strip() if b_match else None,
+            "pipeline_b_video": pipeline_b_video,
+            "pipeline_b_zh": b_zh_match.group(0).strip() if b_zh_match else None,
+            "pipeline_b_json_text": b_json_match.group(0).strip() if b_json_match else None,
             "cli_payload": cli_payload,
         })
     return result
@@ -209,7 +257,17 @@ def save_gus_to_dir(gus: list[dict], out_dir: Path) -> dict:
             p = out_dir / f"gu_{gid}_pipeline_A_image.txt"
             p.write_text(gu["pipeline_a_image"], encoding="utf-8")
             files.append(str(p))
-        if gu.get("pipeline_b_video"):
+        # v3.2: 单独存 B-zh / B-json 两份；v3.0/3.1: 只存合并的 pipeline_b_video
+        if gu.get("pipeline_b_zh"):
+            p = out_dir / f"gu_{gid}_pipeline_B_zh.txt"
+            p.write_text(gu["pipeline_b_zh"], encoding="utf-8")
+            files.append(str(p))
+        if gu.get("pipeline_b_json_text"):
+            p = out_dir / f"gu_{gid}_pipeline_B_json.txt"
+            p.write_text(gu["pipeline_b_json_text"], encoding="utf-8")
+            files.append(str(p))
+        if not gu.get("pipeline_b_zh") and not gu.get("pipeline_b_json_text") and gu.get("pipeline_b_video"):
+            # legacy v3.0/3.1：合并文本另存一份
             p = out_dir / f"gu_{gid}_pipeline_B_video.txt"
             p.write_text(gu["pipeline_b_video"], encoding="utf-8")
             files.append(str(p))
