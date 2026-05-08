@@ -48,6 +48,7 @@ SUBMIT_ID_PATTERNS = [
     re.compile(r"submit_id[=:\s]+([0-9a-f-]{8,})"),
 ]
 GEN_STATUS_PATTERN = re.compile(r'"gen_status"\s*:\s*"(\w+)"')
+QUEUE_IDX_PATTERN = re.compile(r'"queue_idx"\s*:\s*(\d+)')
 FAIL_REASON_PATTERN = re.compile(r'"fail_reason"\s*:\s*"([^"]*)"')
 LOCAL_PATH_PATTERN = re.compile(r"(/[^\s\"',]+\.mp4)")
 
@@ -129,8 +130,8 @@ class DreaminaClient:
         duration: int = 15,
         video_resolution: str = "720p",
         download_dir: Optional[str] = None,
-        max_wait_sec: int = 600,
-        poll_interval: int = 8,
+        max_wait_sec: int = 1800,    # 20 min — seedance2.0fast 高峰时排队 5-15 min 是常态
+        poll_interval: int = 15,     # 队列长就别太勤快，省得撞速率限制
     ) -> DreaminaResult:
         """submit + 自动轮询 + 自动下载到本地 mp4。"""
         if not os.path.exists(self.bin):
@@ -172,6 +173,7 @@ class DreaminaClient:
         deadline = time.monotonic() + max_wait_sec
         polls = 0
         last_out = out
+        last_queue_idx = None
         while time.monotonic() < deadline:
             polls += 1
             time.sleep(poll_interval)
@@ -181,6 +183,12 @@ class DreaminaClient:
             ], timeout=60)
             last_out = out2
             gs = _extract_gen_status(out2)
+            qm = QUEUE_IDX_PATTERN.search(out2)
+            if qm:
+                qi = int(qm.group(1))
+                if last_queue_idx != qi:
+                    logger.info(f"dreamina poll #{polls} sid={sid[:8]} status={gs} queue_idx={qi}")
+                    last_queue_idx = qi
             if gs == "success":
                 # 3) 触发下载
                 rc3, out3, _ = _run([

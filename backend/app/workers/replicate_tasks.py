@@ -200,8 +200,8 @@ def run_video_via_dreamina(self, task_id: str) -> dict:
             model_version=cfg.get("model_version", "seedance2.0fast"),
             duration=int(cfg.get("duration", 15)),
             video_resolution=cfg.get("video_resolution", "720p"),
-            max_wait_sec=int(cfg.get("max_wait_sec", 600)),
-            poll_interval=int(cfg.get("poll_interval", 8)),
+            max_wait_sec=int(cfg.get("max_wait_sec", 1800)),
+            poll_interval=int(cfg.get("poll_interval", 15)),
         )
 
         if not result.success:
