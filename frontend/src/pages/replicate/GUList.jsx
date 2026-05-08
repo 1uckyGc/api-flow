@@ -115,30 +115,31 @@ function GUCard({ gu, onGenerateImage, onGenerateVideo }) {
       </div>
 
       <div className="grid grid-cols-2 divide-x" style={{ borderColor: 'var(--border-subtle)' }}>
-        {/* 产线 A */}
+        {/* 产线 A — HOLO GPT-Images 2.0 */}
         <PipelineColumn
           icon={<ImageIcon size={14} />}
-          label="产线 A · 9宫格图"
+          label="产线 A · 9宫格图（HOLO GPT-Images 2.0）"
           prompt={gu.pipeline_a_image}
           taskState={gu.image_task}
           onGenerate={onGenerateImage}
           mediaType="image"
         />
-        {/* 产线 B */}
+        {/* 产线 B — 暂未开通，按钮 disabled，仍展示提示词 + 复制 */}
         <PipelineColumn
           icon={<Film size={14} />}
-          label="产线 B · 15秒视频"
+          label="产线 B · 15秒视频（暂未开通）"
           prompt={gu.pipeline_b_video}
           taskState={gu.video_task}
           onGenerate={onGenerateVideo}
           mediaType="video"
+          disabled={true}
         />
       </div>
     </div>
   );
 }
 
-function PipelineColumn({ icon, label, prompt, taskState, onGenerate, mediaType }) {
+function PipelineColumn({ icon, label, prompt, taskState, onGenerate, mediaType, disabled = false }) {
   const [copied, setCopied] = useState(false);
 
   const copyPrompt = async () => {
@@ -195,20 +196,24 @@ function PipelineColumn({ icon, label, prompt, taskState, onGenerate, mediaType 
         )}
         <button
           onClick={onGenerate}
-          disabled={inflight || !prompt}
+          disabled={disabled || inflight || !prompt}
           className="w-full px-2 py-1.5 rounded text-xs flex items-center justify-center gap-1.5 transition"
           style={{
-            background: inflight ? 'var(--surface-3)' : (succeeded ? 'var(--surface-2)' : 'var(--accent)'),
-            color: inflight ? 'var(--text-tertiary)' : (succeeded ? 'var(--text-secondary)' : '#fff'),
-            cursor: (inflight || !prompt) ? 'not-allowed' : 'pointer',
+            background: disabled ? 'var(--surface-3)' : (inflight ? 'var(--surface-3)' : (succeeded ? 'var(--surface-2)' : 'var(--accent)')),
+            color: disabled ? 'var(--text-tertiary)' : (inflight ? 'var(--text-tertiary)' : (succeeded ? 'var(--text-secondary)' : '#fff')),
+            cursor: (disabled || inflight || !prompt) ? 'not-allowed' : 'pointer',
+            opacity: disabled ? 0.55 : 1,
           }}
+          title={disabled ? '产线 B 暂未开通，仅展示提示词供复制使用' : undefined}
         >
           {inflight && <Loader2 size={12} className="animate-spin" />}
-          {inflight
-            ? STATUS_LABEL[taskState?.status] || '处理中'
-            : succeeded
-              ? '重新生成'
-              : (mediaType === 'image' ? '一键出图' : '一键出视频')}
+          {disabled
+            ? '暂未开通（可复制提示词）'
+            : inflight
+              ? STATUS_LABEL[taskState?.status] || '处理中'
+              : succeeded
+                ? '重新生成'
+                : (mediaType === 'image' ? '一键出图' : '一键出视频')}
         </button>
       </div>
     </div>
