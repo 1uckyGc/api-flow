@@ -37,7 +37,9 @@ backend/                    FastAPI 应用 + Celery worker
       tasks.py              process_generation 主入口
       director_worker.py    导演模式（锚点 → 并行帧）
       workflow_worker.py    创意工坊运行实例
-      cleanup_tasks.py      celery beat：每天 03:30 清理 30 天前的 ApiCallLog
+      cleanup_tasks.py      celery beat 两个清理任务：
+                              03:30 purge_old_logs (30 天 ApiCallLog 行)
+                              04:00 purge_old_artifacts (3 天 task_groups + 文件 + 前端记录)
       celery_app.py         Celery 工厂 + beat schedule
     prompts.py              提示词模板中心（LLM + 图像）
     utils/                  scheduler（限流）/ file_cleanup / logger
@@ -147,6 +149,15 @@ alembic upgrade head
   - 之前共享 `gemini_veo` slot + 10s 间隔，把 HOLO 锁成 1 task/10s（每小时上限 360）；现在 HOLO 真并发 = `MAX_CONCURRENT_TASKS`
 - **服务器内存上限定 worker 并发**。154.53.75.37 是 4GB 机器、无 swap，threads pool c=100 实测 ~80MB worker 内存；prefork c=100 实测必然 OOM（8GB 需求）。**别动 prefork 的 concurrency 高于 20**，要更高用 threads。x-ui / xray VLESS 也跑在同一台机器上，OOM 会让 VLESS 转发挂掉（曾踩过）。
 - **静态挂载 30 天 immutable 缓存**。`/outputs` 和 `/uploads` 路径走 `add_cache_headers` 中间件，文件名是 UUID 所以这样安全。
+- **3 天滚动清理 task_groups + 文件 + 前端记录**。`workers/cleanup_tasks.py::purge_old_artifacts` 每天 04:00 跑：
+  - 删 `created_at < now - 3d` 的 task_groups（cascade 级联删 sub tasks）
+  - 物理删 `task.output_file` / `output_thumbnail` / `input_files` / `task_group.config_json["anchor_file"]`
+  - **保护规则（A1）**：任何 sub task `status == RUNNING` 的 group 永远不删；`QUEUED / RETRY` 超 3 天视为僵尸一并删
+  - **导演 NEEDS_REVIEW（B2）**：跟成功任务一样 3 天清（不给宽限）
+  - **fission 父子链（C1）**：整链一起删，自引用 `fission_parent_id` 反向引用先置 NULL 解 FK
+  - **ApiCallLog 保留**：`task_id` / `group_id` FK 置 NULL，账单审计行不删（30 天那条规则单独管）
+  - 服务器稳态磁盘 ≈ 3 天产出量（~5GB），永不爆。前端任务列表 3 天后自动消失（DB 行被删）。
+  - 手动触发：`docker exec followmeeeaigc_worker python -c "from app.workers.cleanup_tasks import purge_old_artifacts; print(purge_old_artifacts())"`
 - **Toolbox 下拉的真正实现是 `Utility/ToolPanel.jsx`**（不是 `Toolbox/Toolbox.jsx`）。`/t2i /i2i /t2v /i2v` 全部走 ToolPanel 的硬编码 option 列表 + 三 provider optgroup 分组渲染。改下拉**只改 ToolPanel.jsx**。
 - **Windows + Docker Desktop rebuild 前端时的两个坑**：
   - rebuild 后只 recreate frontend 才能生效：`docker compose up -d --force-recreate --no-deps frontend`
