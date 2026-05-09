@@ -60,6 +60,10 @@ class Settings(BaseSettings):
     PACKYAPI_BASE_URL: str = "https://www.packyapi.com"
     PACKYAPI_GEMINI_KEY: str = ""
 
+    # cc123.ai relay (第三方 Seedance 2.0 video gen，OpenAI 形态 /v1/video/generations)
+    CC123_BASE_URL: str = "https://cc123.ai"
+    CC123_API_KEY: str = ""
+
     MAX_RETRIES: int = 3
 
     @property

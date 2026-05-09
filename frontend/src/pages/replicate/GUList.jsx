@@ -11,13 +11,30 @@ const STATUS_LABEL = {
   retry: '重试',
 };
 
-// 4 个 seedance 模型 + 老 3.0 系列。VIP 变体支持 1080p 且队列优先级更高
-const VIDEO_MODELS = [
-  { value: 'seedance2.0fast', label: 'seedance 2.0 fast · 默认 (720p)', vip: false },
-  { value: 'seedance2.0fast_vip', label: 'seedance 2.0 fast · VIP (720p / 1080p)', vip: true },
-  { value: 'seedance2.0', label: 'seedance 2.0 标准 (720p)', vip: false },
-  { value: 'seedance2.0_vip', label: 'seedance 2.0 · VIP (720p / 1080p)', vip: true },
+// 视频模型分组：官方（即梦 Dreamina CLI）+ 第三方（cc123.ai relay）
+const VIDEO_MODEL_GROUPS = [
+  {
+    label: '官方 · 即梦 Dreamina CLI',
+    options: [
+      { value: 'seedance2.0fast', label: 'seedance 2.0 fast · 默认 (720p)', vip: false },
+      { value: 'seedance2.0fast_vip', label: 'seedance 2.0 fast · VIP (720p / 1080p)', vip: true },
+      { value: 'seedance2.0', label: 'seedance 2.0 标准 (720p)', vip: false },
+      { value: 'seedance2.0_vip', label: 'seedance 2.0 · VIP (720p / 1080p)', vip: true },
+    ],
+  },
+  {
+    label: '第三方 · cc123.ai relay',
+    options: [
+      { value: 'cc123/seedance2.0fast', label: 'cc123 · seedance 2.0 fast', vip: false },
+      { value: 'cc123/seedance2.0', label: 'cc123 · seedance 2.0', vip: false },
+      { value: 'cc123/seedance2.0fast_vip', label: 'cc123 · seedance 2.0 fast · VIP', vip: true },
+      { value: 'cc123/seedance2.0_vip', label: 'cc123 · seedance 2.0 · VIP', vip: true },
+    ],
+  },
 ];
+
+// 平铺所有 model（用于 vip 检测等通用判断）
+const ALL_VIDEO_MODELS = VIDEO_MODEL_GROUPS.flatMap(g => g.options);
 
 const VIDEO_RESOLUTIONS = [
   { value: '720p', label: '720p' },
@@ -32,6 +49,7 @@ export default function GUList({ job, onChange }) {
   const [videoResolution, setVideoResolution] = useState('720p');
 
   const isVip = useMemo(() => videoModel.includes('vip'), [videoModel]);
+  const isCC123 = useMemo(() => videoModel.startsWith('cc123/'), [videoModel]);
 
   // 模型切到非 VIP 时自动把分辨率打回 720p（避免提交 1080p 被后端 guard 强制改）
   useEffect(() => {
@@ -131,10 +149,14 @@ export default function GUList({ job, onChange }) {
           onChange={e => setVideoModel(e.target.value)}
           className="px-3 py-1.5 rounded-md text-xs outline-none"
           style={{ background: 'var(--surface-2)', border: '1px solid var(--border-default)', color: 'var(--text-primary)' }}
-          title="即梦 image2video 模型版本"
+          title="选择视频生成 provider + 模型"
         >
-          {VIDEO_MODELS.map(m => (
-            <option key={m.value} value={m.value}>{m.label}</option>
+          {VIDEO_MODEL_GROUPS.map(group => (
+            <optgroup key={group.label} label={group.label}>
+              {group.options.map(m => (
+                <option key={m.value} value={m.value}>{m.label}</option>
+              ))}
+            </optgroup>
           ))}
         </select>
 
@@ -158,9 +180,11 @@ export default function GUList({ job, onChange }) {
         </select>
 
         <span className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>
-          {isVip
-            ? '✓ VIP 通道：可选 1080p，队列更靠前，credits 消耗更高'
-            : '提示：要 1080p / 队列优先级，选 VIP 模型'}
+          {isCC123
+            ? '🔌 第三方 cc123.ai relay · 纯 HTTP 不需要扫码登录 · 可能更快'
+            : isVip
+              ? '✓ VIP 通道：可选 1080p，队列更靠前，credits 消耗更高'
+              : '官方即梦 · 提示：要 1080p / 队列优先级，选 VIP 模型'}
         </span>
       </div>
 
@@ -188,11 +212,11 @@ export default function GUList({ job, onChange }) {
 }
 
 function GUCard({ gu, videoModel, videoResolution, onGenerateImage, onGenerateVideo }) {
-  // 把模型名简化展示：seedance2.0fast_vip → "fast · VIP"
-  const modelLabel = videoModel
-    .replace('seedance2.0', '')
-    .replace(/^_/, '')
-    .replace('_vip', ' · VIP') || '标准';
+  const isCC123 = videoModel.startsWith('cc123/');
+  // 把模型名简化展示：seedance2.0fast_vip → "fast · VIP"；cc123/seedance2.0fast → "cc123 · fast"
+  const stripped = videoModel.replace('cc123/', '').replace('seedance2.0', '');
+  const modelLabel = stripped.replace(/^_/, '').replace('_vip', ' · VIP') || '标准';
+  const providerLabel = isCC123 ? 'cc123' : '即梦';
 
   return (
     <div className="rounded-xl overflow-hidden" style={{ background: 'var(--surface-1)', border: '1px solid var(--border-subtle)' }}>
@@ -210,10 +234,10 @@ function GUCard({ gu, videoModel, videoResolution, onGenerateImage, onGenerateVi
           onGenerate={onGenerateImage}
           mediaType="image"
         />
-        {/* 产线 B — Dreamina seedance2.0（按顶部工具栏选择） */}
+        {/* 产线 B — 视频（按顶部工具栏选 provider + model） */}
         <PipelineColumn
           icon={<Film size={14} />}
-          label={`产线 B · 15秒视频（即梦 seedance2.0 ${modelLabel} · ${videoResolution}）`}
+          label={`产线 B · 15秒视频（${providerLabel} seedance2.0 ${modelLabel} · ${videoResolution}）`}
           prompt={gu.pipeline_b_video}
           taskState={gu.video_task}
           onGenerate={onGenerateVideo}

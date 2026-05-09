@@ -483,6 +483,10 @@ def generate_video(
     if not image_path:
         raise HTTPException(400, "找不到可用的输入图（建议先一键出图，或在请求里传 image_path）")
 
+    # 路由：cc123/ 前缀 → 第三方 cc123.ai relay；否则官方 dreamina CLI
+    is_cc123 = (model_version or "").startswith("cc123/")
+    provider = "cc123" if is_cc123 else "dreamina"
+
     task = Task(
         id=str(uuid.uuid4()),
         group_id=job_id,
@@ -492,10 +496,11 @@ def generate_video(
         config_json={
             "gu_id": gu_id,
             "kind": "video",
-            "provider": "dreamina",
+            "provider": provider,
             "model_version": model_version,
             "duration": int(duration),
             "video_resolution": video_resolution,
+            "aspect_ratio": payload.get("aspect_ratio") or "9:16",
         },
         status=TaskStatus.QUEUED,
     )
@@ -503,14 +508,18 @@ def generate_video(
     db.commit()
     db.refresh(task)
 
-    from app.workers.replicate_tasks import run_video_via_dreamina
-    run_video_via_dreamina.delay(task.id)
+    if is_cc123:
+        from app.workers.replicate_tasks import run_video_via_cc123
+        run_video_via_cc123.delay(task.id)
+    else:
+        from app.workers.replicate_tasks import run_video_via_dreamina
+        run_video_via_dreamina.delay(task.id)
 
     return {
         "task_id": task.id,
         "gu_id": gu_id,
         "kind": "video",
-        "provider": "dreamina",
+        "provider": provider,
         "model_version": model_version,
         "duration": int(duration),
         "status": task.status.value,

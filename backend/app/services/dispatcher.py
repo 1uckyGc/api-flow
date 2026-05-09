@@ -12,8 +12,9 @@ from typing import Callable, Optional
 
 from app.config import settings
 from app.services.ai_service import GenerationResult, ai_client
+from app.services.cc123_video_client import _aspect_to_wh, get_cc123_client
 from app.services.grok_client import grok_client
-from app.services.model_registry import resolve_provider, get_task_type
+from app.services.model_registry import resolve_provider, strip_provider_prefix, get_task_type
 from app.services.call_logger import record_api_call, complete_api_call
 from app.utils.logger import logger
 
@@ -81,6 +82,12 @@ async def dispatch_generate(
                 model=model, prompt=prompt,
                 image_paths=image_paths, config_json=cfg,
                 api_key=api_key, max_retries=max_retries,
+                progress_callback=progress_callback,
+            )
+        elif provider == "cc123":
+            result = await _run_cc123(
+                model=model, prompt=prompt,
+                image_paths=image_paths, config_json=cfg,
                 progress_callback=progress_callback,
             )
         else:
@@ -179,3 +186,68 @@ async def _run_grok(
                 os.remove(cleanup_path)
             except Exception:
                 pass
+
+
+async def _run_cc123(
+    model: str, prompt: str,
+    image_paths: Optional[list[str]],
+    config_json: dict,
+    progress_callback: Optional[Callable[[str], None]],
+) -> GenerationResult:
+    """cc123.ai relay Seedance 2.0 视频生成路径。
+
+    model 形如 "cc123/seedance2.0fast" → strip 前缀后透传给 cc123 API。
+    image_paths[0] 转 base64 inline 给 image 字段。
+    """
+    result = GenerationResult()
+    client = get_cc123_client()
+    if client is None:
+        result.success = False
+        result.error = "CC123_API_KEY 未配置"
+        return result
+
+    cc123_model = strip_provider_prefix(model)
+
+    # i2v：把第一张图转 base64 data URL
+    image_b64 = None
+    if image_paths:
+        first = image_paths[0]
+        if os.path.exists(first):
+            import base64, mimetypes
+            mime = mimetypes.guess_type(first)[0] or "image/jpeg"
+            with open(first, "rb") as f:
+                image_b64 = f"data:{mime};base64,{base64.b64encode(f.read()).decode()}"
+
+    # 比例 + 分辨率：从 config_json 取，VIP 模型才允许 1080p
+    aspect = config_json.get("aspect_ratio") or "9:16"
+    res = config_json.get("video_resolution") or config_json.get("resolution") or "720p"
+    if res != "720p" and "vip" not in cc123_model:
+        logger.info(f"cc123: forcing resolution {res} → 720p (model {cc123_model} not vip)")
+        res = "720p"
+    width, height = _aspect_to_wh(aspect, res)
+
+    duration = int(config_json.get("seconds") or config_json.get("duration") or 15)
+
+    if progress_callback:
+        await progress_callback(f"提交 cc123 {cc123_model} {width}x{height} {duration}s...")
+
+    cc_result = await client.submit_and_wait(
+        model=cc123_model,
+        prompt=prompt,
+        image_url_or_b64=image_b64,
+        duration=duration,
+        width=width,
+        height=height,
+        max_wait_sec=int(config_json.get("max_wait_sec", 1800)),
+        poll_interval=int(config_json.get("poll_interval", 10)),
+    )
+
+    if not cc_result.success:
+        result.success = False
+        result.error = cc_result.error or "cc123 调用失败"
+        return result
+
+    # 把本地下载好的 mp4 路径回填，跟 HOLO/Grok 流式下载约定保持一致
+    result.success = True
+    result.output_file_path = cc_result.local_video_path or ""
+    return result

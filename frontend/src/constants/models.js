@@ -203,6 +203,7 @@ export function providerOf(model) {
   if (m.startsWith('flow2api/')) return 'flow2api';
   if (m.startsWith('grok/')) return 'grok';
   if (m.startsWith('holo/')) return 'holo';
+  if (m.startsWith('cc123/')) return 'cc123';
   // 2. 命名规则
   if (m.startsWith('grok-')) return 'grok';
   if (m.includes('_ultra')) return 'flow2api';

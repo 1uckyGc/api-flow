@@ -18,6 +18,7 @@ from typing import Optional
 from app.config import settings
 from app.database import SessionLocal
 from app.models.task import GroupStatus, Task, TaskGroup, TaskSource, TaskStatus
+from app.services.cc123_video_client import CC123VideoClient, _aspect_to_wh, get_cc123_client
 from app.services.dreamina_client import DreaminaClient, move_to_outputs
 from app.services.packy_gemini import (
     DEFAULT_GEMINI_MODEL,
@@ -238,5 +239,95 @@ def _fail_task(db, task: Task, message: str) -> dict:
     task.status = TaskStatus.FAILED
     task.error_message = message[:500]
     db.commit()
-    logger.warning(f"dreamina task {task.id} failed: {message}")
+    logger.warning(f"task {task.id} failed: {message}")
     return {"error": message}
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 产线 B 视频生成 — 第三方 cc123.ai Seedance 2.0 路径（HTTP）
+# ─────────────────────────────────────────────────────────────────────
+@celery_app.task(name="app.workers.replicate_tasks.run_video_via_cc123", bind=True)
+def run_video_via_cc123(self, task_id: str) -> dict:
+    """对一个 storyboard pipeline B 子任务，调 cc123.ai relay 出 seedance 视频。
+
+    Task 是由 router.generate_video 创建的（status=QUEUED），config_json 形如:
+      {gu_id, kind="video", provider="cc123",
+       model_version="cc123/seedance2.0fast", duration, video_resolution, aspect_ratio}
+    input_files[0] 用于 i2v 输入。cc123 接受 URL 或 base64，我们用 base64 inline。
+    """
+    db = SessionLocal()
+    try:
+        task: Optional[Task] = db.query(Task).filter(Task.id == task_id).first()
+        if not task:
+            logger.error(f"cc123 task {task_id} not found")
+            return {"error": "task not found"}
+
+        cfg = dict(task.config_json or {})
+        prompt = (task.prompt or "").strip()
+        if not prompt:
+            return _fail_task(db, task, "prompt 为空")
+
+        inputs = task.input_files or []
+        image_b64 = None
+        if inputs and isinstance(inputs, list) and inputs[0]:
+            ip = inputs[0]
+            if not Path(ip).is_absolute():
+                ip = str(Path("/app") / ip)
+            if not Path(ip).exists():
+                return _fail_task(db, task, f"输入图文件不存在: {ip}")
+            import base64, mimetypes
+            mime = mimetypes.guess_type(ip)[0] or "image/jpeg"
+            image_b64 = f"data:{mime};base64,{base64.b64encode(Path(ip).read_bytes()).decode()}"
+
+        # cc123/seedance2.0fast → seedance2.0fast（透传给 cc123 上游）
+        raw_model = cfg.get("model_version", "cc123/seedance2.0fast")
+        cc123_model = raw_model.split("/", 1)[1] if "/" in raw_model else raw_model
+
+        width, height = _aspect_to_wh(
+            cfg.get("aspect_ratio") or "9:16",
+            cfg.get("video_resolution") or "720p",
+        )
+
+        client = get_cc123_client()
+        if client is None:
+            return _fail_task(db, task, "CC123_API_KEY 未配置（.env 里加上）")
+
+        task.status = TaskStatus.RUNNING
+        db.commit()
+
+        result = asyncio.run(
+            client.submit_and_wait(
+                model=cc123_model,
+                prompt=prompt,
+                image_url_or_b64=image_b64,
+                duration=int(cfg.get("duration", 15)),
+                width=width,
+                height=height,
+                max_wait_sec=int(cfg.get("max_wait_sec", 1800)),
+                poll_interval=int(cfg.get("poll_interval", 10)),
+            )
+        )
+
+        if not result.success:
+            return _fail_task(db, task, (result.error or "cc123 调用失败")[:500])
+
+        task.output_file = result.local_video_path
+        task.status = TaskStatus.SUCCESS
+        cfg.update({
+            "cc123_task_id": result.task_id,
+            "cc123_polls": result.poll_count,
+            "cc123_url": result.url,
+        })
+        task.config_json = cfg
+        db.commit()
+        logger.info(f"cc123 task {task_id} success, task_id={result.task_id}, file={result.local_video_path}")
+        return {"ok": True, "task_id": result.task_id, "file": result.local_video_path, "polls": result.poll_count}
+    except Exception as e:
+        logger.exception(f"cc123 task {task_id} crashed")
+        try:
+            task = db.query(Task).filter(Task.id == task_id).first()
+            return _fail_task(db, task, f"任务崩溃：{type(e).__name__}: {e}") if task else {"error": str(e)}
+        except Exception:
+            return {"error": str(e)}
+    finally:
+        db.close()
