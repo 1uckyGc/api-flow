@@ -159,7 +159,7 @@ alembic upgrade head
   - **本地注册已禁用**：`POST /api/auth/register` 返回 410 Gone，账户统一在 https://followmeee.co/manage 管理。
   - **`is_admin` 判定**：`extract_is_admin(upstream)` 兼容多种 shape (`user.is_admin` / `user.role==admin` / 顶层 `is_admin`)；followmeee.co 实际响应字段如有变化，改这一个函数即可。
 - **docker-compose `env_file` 会对 `$` 做变量插值**。bcrypt hash 里的 `$2b$12$...` 必须在 `.env` 写成 `$$2b$$12$$...`（双写转义），否则 `$abc` 会被当作未设变量替换为空，hash 被破坏。同样适用任何含 `$` 的密码/token。
-- **Celery worker 用 `--pool=threads` 不是 prefork**。HOLO/Flow2API 调用是纯 IO-bound（HTTP 等待），prefork 模式每个 worker 是独立 Python 进程，~80MB baseline，c=100 直接吃 8GB → OOM；threads 池 1 进程 + N 线程，c=100 仅 ~80MB 总占用。现状已切 threads + `MAX_CONCURRENT_TASKS=100`（远程 154.53.75.37 实测稳定）。
+- **Celery worker 用 `--pool=threads` 不是 prefork**。HOLO/Flow2API 调用是纯 IO-bound（HTTP 等待），prefork 模式每个 worker 是独立 Python 进程，~80MB baseline，c=100 直接吃 8GB → OOM；threads 池 1 进程 + N 线程，c=100 仅 ~80MB 总占用。现状已切 threads + `MAX_CONCURRENT_TASKS=100`（远程 154.51.41.140 实测稳定）。
   - 配套：`backend/app/database.py` `create_engine(... pool_size=30, max_overflow=20, pool_pre_ping=True, pool_recycle=300)` — 默认 5+10 不够 100 threads 同时拉连接，会 QueuePool overflow
   - threads 池不支持 `--max-memory-per-child`，用 `--max-tasks-per-child=200` 替代（每 worker 处理 200 任务后自动回收）
   - threads 共享内存的 race 实战教训：曾经 `AIClient._http_pool` "per-loop 隔离" 在 prefork 模式下没事（每进程一个 loop），切 threads 后 100 个 loop 同时活互相 aclose 导致大面积失败；现状已改成 per-task client（见上一条）。`grok_client` 用 `async with`、scheduler `_redis_client` 是 per-loop 单例（每 loop 各自的，不共享同一对象）→ 安全。**未来加 module-level mutable state 必须考虑线程竞态**
@@ -168,7 +168,9 @@ alembic upgrade head
   - Flow2API：`wait_for_api_slot(api_type="flow2api", interval_base=5)` — 自托管易触验证码，5s 一个 slot 严格串行
   - Grok：`wait_for_api_slot(api_type="grok", interval_base=1)` — 在 `grok_client.py` 内调
   - 之前共享 `gemini_veo` slot + 10s 间隔，把 HOLO 锁成 1 task/10s（每小时上限 360）；现在 HOLO 真并发 = `MAX_CONCURRENT_TASKS`
-- **服务器内存上限定 worker 并发**。154.53.75.37 是 4GB 机器、无 swap，threads pool c=100 实测 ~80MB worker 内存；prefork c=100 实测必然 OOM（8GB 需求）。**别动 prefork 的 concurrency 高于 20**，要更高用 threads。x-ui / xray VLESS 也跑在同一台机器上，OOM 会让 VLESS 转发挂掉（曾踩过）。
+- **服务器内存上限定 worker 并发**。生产 VPS（VMRack 洛杉矶 L3.VPS.4C4G.Plus，4 核 4GB 无 swap，IP `154.51.41.140`）threads pool c=100 实测 ~80MB worker 内存；prefork c=100 实测必然 OOM（8GB 需求）。**别动 prefork 的 concurrency 高于 20**，要更高用 threads。
+  - **x-ui / xray 已停用**：之前同机器跑 VLESS 转发，但 2026-05-09 实测 inbound 滥用流量（138GB Yahoo Mail 出站 / xray fd 飙到 2400+ / SYN-SENT 1156）会把整个 sshd / docker accept queue 挤爆，导致 api-flow 也卡。已 `systemctl disable --now x-ui` 永久关闭，开机不再自启。`/etc/x-ui/x-ui.db` 完整保留，含 21 inbound + 多个高流量可疑 client（`zbstunbx`/`mtt4eyz3`/`0yben2ny` 等），如要恢复必须先 audit 删掉滥用 client 否则立刻又被 abuse 上游投诉。**这台 VPS 现在 api-flow 独占**。
+  - **历史 IP 迁移**：旧 IP `154.53.75.37` 已废弃（2026-05-09 上午 VMRack 北美上游链路抖动期间换为 `154.51.41.140`，所有 docker volumes / dreamina_token / postgres_data 跟着新 IP 完整迁移）。SSH `~/.ssh/config` 里 `Host apiflow` 已切到新 IP。**任何对外分发的 URL（前端、API、Caddy 反代）都要用新 IP 或者域名 → A 记录，避免下次换 IP 全员重发**。
 - **复刻视频（/replicate）三段式流程**：
   - **阶段 1 — LLM**：上传样片视频 + N 张商品图 + 品牌表单 → 渲染 `01_master_prompt.md`（注入 `{{BRAND_CONFIG_BLOCK}}`）。
     - **自动模式（默认勾选）**：派 `run_storyboard_llm` Celery 任务调 PackyAPI Gemini → group.status 从 PROCESSING → COMPLETED；视频靠 `{type:image_url, image_url:{url:"data:video/mp4;base64,..."}}` 单条 POST 喂给 gemini-3-flash-preview，gateway 按 mime 路由到 Gemini 视频解码器（**OpenAI 形态 `/v1/chat/completions`，不是 Gemini `/v1beta/`，PackyAPI Gemini 分组 key 走这条**）
