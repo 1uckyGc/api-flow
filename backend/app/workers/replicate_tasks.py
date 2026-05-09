@@ -267,26 +267,20 @@ def run_video_via_cc123(self, task_id: str) -> dict:
         if not prompt:
             return _fail_task(db, task, "prompt 为空")
 
+        # i2v 输入图：用绝对路径（worker /app 是项目根）
         inputs = task.input_files or []
-        image_b64 = None
+        image_path = None
         if inputs and isinstance(inputs, list) and inputs[0]:
             ip = inputs[0]
             if not Path(ip).is_absolute():
                 ip = str(Path("/app") / ip)
             if not Path(ip).exists():
                 return _fail_task(db, task, f"输入图文件不存在: {ip}")
-            import base64, mimetypes
-            mime = mimetypes.guess_type(ip)[0] or "image/jpeg"
-            image_b64 = f"data:{mime};base64,{base64.b64encode(Path(ip).read_bytes()).decode()}"
+            image_path = ip
 
-        # cc123/seedance2.0fast → seedance2.0fast（透传给 cc123 上游）
-        raw_model = cfg.get("model_version", "cc123/seedance2.0fast")
+        # cc123/sd-2 → sd-2（strip 前缀后透传给 cc123 上游）
+        raw_model = cfg.get("model_version", "cc123/sd-2")
         cc123_model = raw_model.split("/", 1)[1] if "/" in raw_model else raw_model
-
-        width, height = _aspect_to_wh(
-            cfg.get("aspect_ratio") or "9:16",
-            cfg.get("video_resolution") or "720p",
-        )
 
         client = get_cc123_client()
         if client is None:
@@ -299,10 +293,8 @@ def run_video_via_cc123(self, task_id: str) -> dict:
             client.submit_and_wait(
                 model=cc123_model,
                 prompt=prompt,
-                image_url_or_b64=image_b64,
-                duration=int(cfg.get("duration", 15)),
-                width=width,
-                height=height,
+                image_path=image_path,
+                seconds=int(cfg.get("duration", 15)),
                 max_wait_sec=int(cfg.get("max_wait_sec", 1800)),
                 poll_interval=int(cfg.get("poll_interval", 10)),
             )

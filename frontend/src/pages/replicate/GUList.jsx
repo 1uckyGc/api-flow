@@ -25,10 +25,8 @@ const VIDEO_MODEL_GROUPS = [
   {
     label: '第三方 · cc123.ai relay',
     options: [
-      { value: 'cc123/seedance2.0fast', label: 'cc123 · seedance 2.0 fast', vip: false },
-      { value: 'cc123/seedance2.0', label: 'cc123 · seedance 2.0', vip: false },
-      { value: 'cc123/seedance2.0fast_vip', label: 'cc123 · seedance 2.0 fast · VIP', vip: true },
-      { value: 'cc123/seedance2.0_vip', label: 'cc123 · seedance 2.0 · VIP', vip: true },
+      { value: 'cc123/sd-2', label: 'cc123 · sd-2 标准 (Seedance 2.0)', vip: false },
+      { value: 'cc123/sd-2-vip', label: 'cc123 · sd-2 VIP (1080p · 队列优先)', vip: true },
     ],
   },
 ];
@@ -213,9 +211,16 @@ export default function GUList({ job, onChange }) {
 
 function GUCard({ gu, videoModel, videoResolution, onGenerateImage, onGenerateVideo }) {
   const isCC123 = videoModel.startsWith('cc123/');
-  // 把模型名简化展示：seedance2.0fast_vip → "fast · VIP"；cc123/seedance2.0fast → "cc123 · fast"
-  const stripped = videoModel.replace('cc123/', '').replace('seedance2.0', '');
-  const modelLabel = stripped.replace(/^_/, '').replace('_vip', ' · VIP') || '标准';
+  // 模型名简化展示
+  let modelLabel;
+  if (isCC123) {
+    // cc123/sd-2 → "sd-2"；cc123/sd-2-vip → "sd-2 · VIP"
+    modelLabel = videoModel.replace('cc123/', '').replace('-vip', ' · VIP');
+  } else {
+    // 即梦：seedance2.0fast_vip → "fast · VIP"
+    const stripped = videoModel.replace('seedance2.0', '');
+    modelLabel = stripped.replace(/^_/, '').replace('_vip', ' · VIP') || '标准';
+  }
   const providerLabel = isCC123 ? 'cc123' : '即梦';
 
   return (

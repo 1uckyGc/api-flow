@@ -194,10 +194,10 @@ async def _run_cc123(
     config_json: dict,
     progress_callback: Optional[Callable[[str], None]],
 ) -> GenerationResult:
-    """cc123.ai relay Seedance 2.0 视频生成路径。
+    """cc123.ai relay Seedance 2.0 视频生成路径（OpenAI Sora-compat /v1/videos）。
 
-    model 形如 "cc123/seedance2.0fast" → strip 前缀后透传给 cc123 API。
-    image_paths[0] 转 base64 inline 给 image 字段。
+    model 形如 "cc123/sd-2" 或 "cc123/sd-2-vip" → strip 前缀后透传给 cc123。
+    image_paths[0] 直接以 multipart input_reference 上传（i2v）。
     """
     result = GenerationResult()
     client = get_cc123_client()
@@ -208,36 +208,27 @@ async def _run_cc123(
 
     cc123_model = strip_provider_prefix(model)
 
-    # i2v：把第一张图转 base64 data URL
-    image_b64 = None
+    # i2v：直接用本地图片绝对路径（worker /app 工作目录）
+    image_path = None
     if image_paths:
         first = image_paths[0]
-        if os.path.exists(first):
-            import base64, mimetypes
-            mime = mimetypes.guess_type(first)[0] or "image/jpeg"
-            with open(first, "rb") as f:
-                image_b64 = f"data:{mime};base64,{base64.b64encode(f.read()).decode()}"
+        if os.path.isabs(first) and os.path.exists(first):
+            image_path = first
+        elif os.path.exists(os.path.join("/app", first)):
+            image_path = os.path.join("/app", first)
+        elif os.path.exists(first):
+            image_path = first
 
-    # 比例 + 分辨率：从 config_json 取，VIP 模型才允许 1080p
-    aspect = config_json.get("aspect_ratio") or "9:16"
-    res = config_json.get("video_resolution") or config_json.get("resolution") or "720p"
-    if res != "720p" and "vip" not in cc123_model:
-        logger.info(f"cc123: forcing resolution {res} → 720p (model {cc123_model} not vip)")
-        res = "720p"
-    width, height = _aspect_to_wh(aspect, res)
-
-    duration = int(config_json.get("seconds") or config_json.get("duration") or 15)
+    seconds = int(config_json.get("seconds") or config_json.get("duration") or 15)
 
     if progress_callback:
-        await progress_callback(f"提交 cc123 {cc123_model} {width}x{height} {duration}s...")
+        await progress_callback(f"提交 cc123 {cc123_model} {seconds}s...")
 
     cc_result = await client.submit_and_wait(
         model=cc123_model,
         prompt=prompt,
-        image_url_or_b64=image_b64,
-        duration=duration,
-        width=width,
-        height=height,
+        image_path=image_path,
+        seconds=seconds,
         max_wait_sec=int(config_json.get("max_wait_sec", 1800)),
         poll_interval=int(config_json.get("poll_interval", 10)),
     )
