@@ -35,6 +35,45 @@ const VIDEO_MODEL_GROUPS = [
 // 平铺所有 model（用于 vip 检测等通用判断）
 const ALL_VIDEO_MODELS = VIDEO_MODEL_GROUPS.flatMap(g => g.options);
 
+// 识别上游典型错误模式 → 友好格式化
+function formatTaskError(rawMsg) {
+  const msg = String(rawMsg || '');
+
+  // cc123 余额不足：HTTP 403 + insufficient_user_quota
+  // 形如：HTTP 403: {"code":"insufficient_user_quota","message":"预扣费额度失败, 用户剩余额度: ＄7.149588, 需要预扣费额度: ＄7.410000",...}
+  const ccQuota = msg.match(/insufficient_user_quota[\s\S]*?剩余额度[:：\s]*[＄$]([\d.]+)[\s\S]*?预扣费额度[:：\s]*[＄$]([\d.]+)/);
+  if (ccQuota) {
+    const have = parseFloat(ccQuota[1]);
+    const need = parseFloat(ccQuota[2]);
+    return {
+      title: 'cc123 账户余额不足',
+      detail: `本次估算需 $${need.toFixed(2)}，当前余额 $${have.toFixed(2)}（差 $${(need - have).toFixed(2)}）`,
+      hint: '请去 cc123.ai 充值，或换更便宜的组合（sd-2 + portrait + 720p + 5s ≈ $1.4）',
+    };
+  }
+
+  // dreamina 未登录
+  if (msg.includes('未检测到有效登录态') || msg.includes('Dreamina CLI 未登录')) {
+    return {
+      title: '即梦 Dreamina 未登录',
+      detail: msg.slice(0, 200),
+      hint: 'SSH 进 worker 跑 `dreamina login` 一次扫码；或者切到 cc123 模型',
+    };
+  }
+
+  // 1080p 不兼容
+  if (msg.includes('video_resolution 1080p requires model_version')) {
+    return {
+      title: '1080p 仅 VIP 模型支持',
+      detail: msg.slice(0, 200),
+      hint: '请选 sd-2-vip / seedance2.0_vip 类 VIP 模型，或切回 720p',
+    };
+  }
+
+  // 默认：原样
+  return { title: null, detail: msg, hint: null };
+}
+
 const VIDEO_RESOLUTIONS = [
   { value: '720p', label: '720p' },
   { value: '1080p', label: '1080p（仅 VIP）' },
@@ -330,11 +369,22 @@ function PipelineColumn({ icon, label, prompt, taskState, onGenerate, mediaType,
             )}
           </div>
         )}
-        {failed && (
-          <div className="text-[11px] mb-2 px-2 py-1 rounded" style={{ background: '#7f1d1d33', color: '#fca5a5' }}>
-            ❌ {taskState.error_message || '生成失败'}
-          </div>
-        )}
+        {failed && (() => {
+          const f = formatTaskError(taskState?.error_message);
+          return (
+            <div className="text-[11px] mb-2 px-2 py-1.5 rounded" style={{ background: '#7f1d1d33', color: '#fca5a5' }}>
+              {f.title ? (
+                <>
+                  <div className="font-semibold flex items-center gap-1">⚠️ {f.title}</div>
+                  <div className="mt-0.5 opacity-90">{f.detail}</div>
+                  {f.hint && <div className="mt-0.5 opacity-70">💡 {f.hint}</div>}
+                </>
+              ) : (
+                <>❌ {f.detail || '生成失败'}</>
+              )}
+            </div>
+          );
+        })()}
         <button
           onClick={onGenerate}
           disabled={inflight || !prompt}
