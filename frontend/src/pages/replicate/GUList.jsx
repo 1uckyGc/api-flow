@@ -25,8 +25,9 @@ const VIDEO_MODEL_GROUPS = [
   {
     label: '第三方 · cc123.ai relay',
     options: [
-      { value: 'cc123/sd-2', label: 'cc123 · sd-2 标准 (Seedance 2.0)', vip: false },
-      { value: 'cc123/sd-2-vip', label: 'cc123 · sd-2 VIP (1080p · 队列优先)', vip: true },
+      { value: 'cc123/sd-2', label: 'cc123 · sd-2 (Seedance 2.0 标准)', vip: false },
+      { value: 'cc123/sd-2-vip', label: 'cc123 · sd-2-vip (Seedance 2.0 · 队列优先)', vip: true },
+      { value: 'cc123/sora-2', label: 'cc123 · sora-2 (OpenAI Sora 2)', vip: false },
     ],
   },
 ];

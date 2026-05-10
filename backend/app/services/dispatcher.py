@@ -12,7 +12,7 @@ from typing import Callable, Optional
 
 from app.config import settings
 from app.services.ai_service import GenerationResult, ai_client
-from app.services.cc123_video_client import _aspect_to_wh, get_cc123_client
+from app.services.cc123_video_client import _aspect_to_orientation, get_cc123_client
 from app.services.grok_client import grok_client
 from app.services.model_registry import resolve_provider, strip_provider_prefix, get_task_type
 from app.services.call_logger import record_api_call, complete_api_call
@@ -194,10 +194,10 @@ async def _run_cc123(
     config_json: dict,
     progress_callback: Optional[Callable[[str], None]],
 ) -> GenerationResult:
-    """cc123.ai relay Seedance 2.0 视频生成路径（OpenAI Sora-compat /v1/videos）。
+    """cc123.ai relay 视频生成路径（POST /v1/video/generations JSON）。
 
-    model 形如 "cc123/sd-2" 或 "cc123/sd-2-vip" → strip 前缀后透传给 cc123。
-    image_paths[0] 直接以 multipart input_reference 上传（i2v）。
+    model 形如 "cc123/sd-2" / "cc123/sd-2-vip" / "cc123/sora-2" → strip 前缀后透传。
+    cc123 当前 schema 不支持 i2v 输入图（暂未明示 image_url 字段），全走 t2v。
     """
     result = GenerationResult()
     client = get_cc123_client()
@@ -208,27 +208,22 @@ async def _run_cc123(
 
     cc123_model = strip_provider_prefix(model)
 
-    # i2v：直接用本地图片绝对路径（worker /app 工作目录）
-    image_path = None
-    if image_paths:
-        first = image_paths[0]
-        if os.path.isabs(first) and os.path.exists(first):
-            image_path = first
-        elif os.path.exists(os.path.join("/app", first)):
-            image_path = os.path.join("/app", first)
-        elif os.path.exists(first):
-            image_path = first
-
-    seconds = int(config_json.get("seconds") or config_json.get("duration") or 15)
+    aspect = config_json.get("aspect_ratio") or "9:16"
+    orientation = _aspect_to_orientation(aspect)
+    duration = int(config_json.get("seconds") or config_json.get("duration") or 5)
+    size = config_json.get("size") or "large"
+    watermark = bool(config_json.get("watermark", False))
 
     if progress_callback:
-        await progress_callback(f"提交 cc123 {cc123_model} {seconds}s...")
+        await progress_callback(f"提交 cc123 {cc123_model} {orientation} {duration}s...")
 
     cc_result = await client.submit_and_wait(
         model=cc123_model,
         prompt=prompt,
-        image_path=image_path,
-        seconds=seconds,
+        duration=duration,
+        orientation=orientation,
+        size=size,
+        watermark=watermark,
         max_wait_sec=int(config_json.get("max_wait_sec", 1800)),
         poll_interval=int(config_json.get("poll_interval", 10)),
     )
@@ -238,7 +233,7 @@ async def _run_cc123(
         result.error = cc_result.error or "cc123 调用失败"
         return result
 
-    # 把本地下载好的 mp4 路径回填，跟 HOLO/Grok 流式下载约定保持一致
+    # 跟 HOLO/Grok 流式下载约定保持一致
     result.success = True
     result.output_file_path = cc_result.local_video_path or ""
     return result

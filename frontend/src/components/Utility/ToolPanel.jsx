@@ -449,9 +449,10 @@ export default function ToolPanel() {
                     {kind === 't2v' && <option value="veo_t2v_lite">VEO 3.1 T2V Lite</option>}
                     {kind === 'i2v' && <option value="veo_i2v_lite">VEO 3.1 I2V Lite — 首帧</option>}
                     {kind === 'i2v' && <option value="veo_interpolation_lite">VEO 3.1 Interpolation Lite — 首尾帧</option>}
-                    <option disabled>──── 第三方 · cc123.ai (Seedance 2.0) ────</option>
-                    <option value="cc123/sd-2">cc123 · sd-2 标准 (720p)</option>
-                    <option value="cc123/sd-2-vip">cc123 · sd-2 VIP (1080p · 队列优先)</option>
+                    <option disabled>──── 第三方 · cc123.ai (Seedance / Sora) ────</option>
+                    <option value="cc123/sd-2">cc123 · sd-2 (Seedance 2.0)</option>
+                    <option value="cc123/sd-2-vip">cc123 · sd-2-vip (Seedance 2.0 · 队列优先)</option>
+                    <option value="cc123/sora-2">cc123 · sora-2 (OpenAI Sora 2)</option>
                     <option disabled>──── Grok ────</option>
                     <option value={kind === 'i2v' ? 'grok-imagine-video-i2v' : 'grok-imagine-video-t2v'}>
                       Grok Imagine Video (Super+)

@@ -18,7 +18,7 @@ from typing import Optional
 from app.config import settings
 from app.database import SessionLocal
 from app.models.task import GroupStatus, Task, TaskGroup, TaskSource, TaskStatus
-from app.services.cc123_video_client import CC123VideoClient, _aspect_to_wh, get_cc123_client
+from app.services.cc123_video_client import CC123VideoClient, _aspect_to_orientation, get_cc123_client
 from app.services.dreamina_client import DreaminaClient, move_to_outputs
 from app.services.packy_gemini import (
     DEFAULT_GEMINI_MODEL,
@@ -267,16 +267,7 @@ def run_video_via_cc123(self, task_id: str) -> dict:
         if not prompt:
             return _fail_task(db, task, "prompt 为空")
 
-        # i2v 输入图：用绝对路径（worker /app 是项目根）
-        inputs = task.input_files or []
-        image_path = None
-        if inputs and isinstance(inputs, list) and inputs[0]:
-            ip = inputs[0]
-            if not Path(ip).is_absolute():
-                ip = str(Path("/app") / ip)
-            if not Path(ip).exists():
-                return _fail_task(db, task, f"输入图文件不存在: {ip}")
-            image_path = ip
+        # cc123 当前 schema 不支持 i2v 输入图，task.input_files 仅做记录不传给上游
 
         # cc123/sd-2 → sd-2（strip 前缀后透传给 cc123 上游）
         raw_model = cfg.get("model_version", "cc123/sd-2")
@@ -286,6 +277,12 @@ def run_video_via_cc123(self, task_id: str) -> dict:
         if client is None:
             return _fail_task(db, task, "CC123_API_KEY 未配置（.env 里加上）")
 
+        aspect = cfg.get("aspect_ratio") or "9:16"
+        orientation = _aspect_to_orientation(aspect)
+        duration = int(cfg.get("duration", 5))
+        size = cfg.get("size") or "large"
+        watermark = bool(cfg.get("watermark", False))
+
         task.status = TaskStatus.RUNNING
         db.commit()
 
@@ -293,8 +290,10 @@ def run_video_via_cc123(self, task_id: str) -> dict:
             client.submit_and_wait(
                 model=cc123_model,
                 prompt=prompt,
-                image_path=image_path,
-                seconds=int(cfg.get("duration", 15)),
+                duration=duration,
+                orientation=orientation,
+                size=size,
+                watermark=watermark,
                 max_wait_sec=int(cfg.get("max_wait_sec", 1800)),
                 poll_interval=int(cfg.get("poll_interval", 10)),
             )
@@ -308,7 +307,7 @@ def run_video_via_cc123(self, task_id: str) -> dict:
         cfg.update({
             "cc123_task_id": result.task_id,
             "cc123_polls": result.poll_count,
-            "cc123_url": result.url,
+            "cc123_upstream_url": result.upstream_url,
         })
         task.config_json = cfg
         db.commit()

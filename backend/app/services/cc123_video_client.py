@@ -1,17 +1,24 @@
-"""cc123.ai relay 视频生成客户端（OpenAI Sora 兼容形态，sd-2 / sora-2 系列）。
+"""cc123.ai relay 视频生成客户端 — 第三方 Seedance 2.0 / Sora-2 接入路径。
 
-实测确定的 API 形态（2026-05-10）：
-  POST /v1/videos                    multipart/form-data — 创建视频任务
-    fields: model / prompt / seconds / input_reference (binary, 可选 i2v)
-    → {id, status, ...} (跟 OpenAI Sora API 一致)
-  GET  /v1/videos/{id}               查询视频任务状态
-    → {id, status, ...}  status: queued / in_progress / completed / failed
-  GET  /v1/videos/{id}/content       流式下载 mp4 (status=completed 后)
+实测确定的 API 形态（2026-05-11，由用户官方样例核实）：
 
-cc123 上 seedance 实际只有 2 个变体（来自 GET /v1/models）：
-  sd-2          — 标准
-  sd-2-vip      — VIP（支持 1080p、队列优先）
-（也支持 sora-2 但本客户端只用于 seedance 路径）
+  POST /v1/video/generations           创建任务（application/json）
+    body: {model, orientation, size, prompt, duration, watermark}
+    返:   {id, task_id, status: "queued", progress: 0, created_at}
+
+  GET /v1/videos/{task_id}             查询任务状态（OpenAI compat）
+    返:   {status: queued/in_progress/completed/failed, progress, metadata: {url}}
+
+  GET /v1/videos/{task_id}/content     流式下载 mp4（cc123 自己代理上游）
+
+可用模型（来自 GET /v1/models 列表 + 用户文档）：
+  sd-2          字节 Seedance 2.0 标准
+  sd-2-vip      字节 Seedance 2.0 VIP（更高优先级 / 1080p）
+  sora-2        OpenAI Sora 2
+
+注意：
+  - 之前用 /v1/videos multipart 是错的端点；用 /v1/video/generations JSON 才是正解
+  - i2v 目前 schema 文档无明示，先只支持 t2v（image_path 字段保留但暂未启用）
 """
 from __future__ import annotations
 
@@ -31,6 +38,7 @@ from app.utils.logger import logger
 SUPPORTED_CC123_MODELS = (
     "sd-2",
     "sd-2-vip",
+    "sora-2",
 )
 
 
@@ -40,27 +48,20 @@ class CC123Result:
     task_id: Optional[str] = None
     status: Optional[str] = None
     local_video_path: Optional[str] = None  # 下载到本地后的路径（outputs/<uuid>.mp4）
+    upstream_url: Optional[str] = None      # cc123 metadata.url（content 代理）
     error: Optional[str] = None
     poll_count: int = 0
     raw_response: Optional[dict] = None
 
 
-def _aspect_to_wh(aspect_ratio: Optional[str], resolution: str = "720p") -> tuple[int, int]:
-    """把 9:16 / 16:9 / 1:1 + 720p/1080p 转 (width, height)。
-    sd-2 系列实际不接受 width/height，但保留这个 helper 给前端展示用。
-    """
-    if resolution == "1080p":
-        base = 1080
-    else:
-        base = 720
+def _aspect_to_orientation(aspect_ratio: Optional[str]) -> str:
+    """前端比例 → cc123 orientation。9:16/2:3 → portrait，其他 → landscape。"""
     ar = (aspect_ratio or "9:16").strip()
-    if ar in ("9:16", "9_16"):
-        return (base, int(base * 16 / 9))
-    if ar in ("16:9", "16_9"):
-        return (int(base * 16 / 9), base)
-    if ar in ("1:1", "1_1"):
-        return (base, base)
-    return (720, 1280)
+    if ar in ("9:16", "9_16", "2:3", "2_3", "3:4", "3_4"):
+        return "portrait"
+    if ar in ("16:9", "16_9", "3:2", "3_2", "4:3", "4_3", "21:9"):
+        return "landscape"
+    return "portrait"
 
 
 class CC123VideoClient:
@@ -76,7 +77,13 @@ class CC123VideoClient:
         self.base_url = (base_url or "https://cc123.ai").rstrip("/")
         self.timeout_sec = float(timeout_sec)
 
-    def _auth_header(self) -> dict:
+    def _headers(self) -> dict:
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+    def _auth_only(self) -> dict:
         return {"Authorization": f"Bearer {self.api_key}"}
 
     async def submit_video(
@@ -84,40 +91,28 @@ class CC123VideoClient:
         *,
         model: str,
         prompt: str,
-        image_path: Optional[str] = None,    # i2v 时传本地图片绝对路径
-        seconds: int = 15,
+        duration: int = 5,
+        orientation: str = "portrait",
+        size: str = "large",
+        watermark: bool = False,
     ) -> tuple[Optional[str], Optional[dict], Optional[str]]:
         """submit → (task_id, raw, error)。"""
-        files = {}
-        data = {
+        payload = {
             "model": model,
+            "orientation": orientation,
+            "size": size,
             "prompt": prompt,
-            "seconds": str(int(seconds)),
+            "duration": int(duration),
+            "watermark": bool(watermark),
         }
-        if image_path and os.path.exists(image_path):
-            # multipart 文件字段名按 OpenAPI doc 是 input_reference
-            files["input_reference"] = (
-                os.path.basename(image_path),
-                open(image_path, "rb"),
-                "application/octet-stream",
-            )
-
         try:
             async with httpx.AsyncClient(timeout=self.timeout_sec) as cli:
                 r = await cli.post(
-                    f"{self.base_url}/v1/videos",
-                    data=data,
-                    files=files if files else None,
-                    headers=self._auth_header(),
+                    f"{self.base_url}/v1/video/generations",
+                    json=payload, headers=self._headers(),
                 )
         except (httpx.TimeoutException, httpx.NetworkError) as e:
             return None, None, f"network: {type(e).__name__}: {e}"
-        finally:
-            for _name, fobj_tuple in files.items():
-                try:
-                    fobj_tuple[1].close()
-                except Exception:
-                    pass
 
         if r.status_code != 200:
             return None, None, f"HTTP {r.status_code}: {r.text[:300]}"
@@ -126,21 +121,24 @@ class CC123VideoClient:
         except Exception as e:
             return None, None, f"json decode: {e}"
 
-        # cc123 / OpenAI 错误形态： {"code": "...", "message": "..."}
-        if "code" in resp and resp.get("data") is None:
+        # cc123 错误形态： {"code": "...", "message": "..."}
+        if "code" in resp and resp.get("data") is None and "task_id" not in resp and "id" not in resp:
             return None, resp, f"{resp.get('code')}: {resp.get('message','')}"
 
-        tid = resp.get("id") or resp.get("task_id")
+        tid = resp.get("task_id") or resp.get("id")
         if not tid:
-            return None, resp, f"no id in response: {str(resp)[:200]}"
+            return None, resp, f"no task_id in response: {str(resp)[:200]}"
         return tid, resp, None
 
     async def query_result(self, task_id: str) -> tuple[Optional[dict], Optional[str]]:
+        """查询任务状态，用 OpenAI compat 端点 /v1/videos/{id}。
+        返字段： {status, progress, metadata.url, ...}。
+        """
         try:
             async with httpx.AsyncClient(timeout=self.timeout_sec) as cli:
                 r = await cli.get(
                     f"{self.base_url}/v1/videos/{task_id}",
-                    headers=self._auth_header(),
+                    headers=self._auth_only(),
                 )
         except (httpx.TimeoutException, httpx.NetworkError) as e:
             return None, f"network: {type(e).__name__}: {e}"
@@ -157,11 +155,11 @@ class CC123VideoClient:
         out_dir.mkdir(parents=True, exist_ok=True)
         dst = out_dir / f"{uuid.uuid4().hex}.mp4"
         try:
-            async with httpx.AsyncClient(timeout=self.timeout_sec * 5) as cli:
+            async with httpx.AsyncClient(timeout=self.timeout_sec * 5, follow_redirects=True) as cli:
                 async with cli.stream(
                     "GET",
                     f"{self.base_url}/v1/videos/{task_id}/content",
-                    headers=self._auth_header(),
+                    headers=self._auth_only(),
                 ) as resp:
                     if resp.status_code != 200:
                         body = await resp.aread()
@@ -183,15 +181,18 @@ class CC123VideoClient:
         *,
         model: str,
         prompt: str,
-        image_path: Optional[str] = None,
-        seconds: int = 15,
+        duration: int = 5,
+        orientation: str = "portrait",
+        size: str = "large",
+        watermark: bool = False,
         max_wait_sec: int = 1800,
         poll_interval: int = 10,
     ) -> CC123Result:
         """submit → 轮询 → 下载，全程异步。"""
         tid, raw, err = await self.submit_video(
             model=model, prompt=prompt,
-            image_path=image_path, seconds=seconds,
+            duration=duration, orientation=orientation,
+            size=size, watermark=watermark,
         )
         if not tid:
             return CC123Result(success=False, error=err or "submit failed", raw_response=raw)
@@ -199,31 +200,37 @@ class CC123VideoClient:
         deadline = asyncio.get_event_loop().time() + max_wait_sec
         polls = 0
         last_status = None
+        last_progress = None
         while asyncio.get_event_loop().time() < deadline:
             polls += 1
             await asyncio.sleep(poll_interval)
             data, qerr = await self.query_result(tid)
             if qerr:
-                logger.warning(f"cc123 poll #{polls} sid={tid[:12]}: {qerr}")
+                logger.warning(f"cc123 poll #{polls} sid={tid[:14]}: {qerr}")
                 continue
             status = (data or {}).get("status")
-            if status != last_status:
-                logger.info(f"cc123 poll #{polls} sid={tid[:12]}: status={status}")
+            progress = (data or {}).get("progress")
+            if status != last_status or progress != last_progress:
+                logger.info(f"cc123 poll #{polls} sid={tid[:14]}: status={status} progress={progress}")
                 last_status = status
-            if status == "completed":
+                last_progress = progress
+            if status in ("completed", "succeeded", "success"):
+                upstream = ((data or {}).get("metadata") or {}).get("url")
                 local = await self.download_content(tid)
                 if not local:
                     return CC123Result(
                         success=False, task_id=tid, status=status,
+                        upstream_url=upstream,
                         error="completed but content download failed",
                         raw_response=data, poll_count=polls,
                     )
                 return CC123Result(
                     success=True, task_id=tid, status=status,
-                    local_video_path=local, raw_response=data, poll_count=polls,
+                    local_video_path=local, upstream_url=upstream,
+                    raw_response=data, poll_count=polls,
                 )
             if status == "failed":
-                err_obj = data.get("error") or {}
+                err_obj = (data or {}).get("error") or {}
                 err_msg = err_obj.get("message") if isinstance(err_obj, dict) else str(err_obj)
                 return CC123Result(
                     success=False, task_id=tid, status=status,
