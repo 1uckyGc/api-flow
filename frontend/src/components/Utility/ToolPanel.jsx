@@ -445,6 +445,13 @@ export default function ToolPanel() {
                     {VIDEO_MODELS.holo[kind][orient].map(o => (
                       <option key={`holo-${o.value}`} value={o.value}>{o.label}</option>
                     ))}
+                    {kind === 'i2v' && (
+                      <>
+                        <option disabled>──── HOLO · Sora 2 ────</option>
+                        <option value="Sora-2-12">HOLO · Sora-2 (12s)</option>
+                        <option value="Sora-2-16">HOLO · Sora-2 (16s)</option>
+                      </>
+                    )}
                     <option disabled>──── Flow2API ────</option>
                     {kind === 'i2v' && (
                       <>
