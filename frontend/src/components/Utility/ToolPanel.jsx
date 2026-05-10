@@ -416,6 +416,15 @@ export default function ToolPanel() {
                       <option value="flow2api/gemini-3.1-flash-image-portrait">
                         Flow2API · Gemini 3.1 Flash 竖屏{path.includes('i2i') ? ' (R2I)' : ''}
                       </option>
+                      <option disabled>──── Dreamina（即梦）────</option>
+                      {path.includes('t2i') ? (
+                        <>
+                          <option value="dreamina/t2i-5.0">即梦 · text2image 5.0（最新）</option>
+                          <option value="dreamina/t2i-4.6">即梦 · text2image 4.6</option>
+                        </>
+                      ) : (
+                        <option value="dreamina/i2i-default">即梦 · image2image（默认）</option>
+                      )}
                       <option disabled>──── Grok ────</option>
                       {path.includes('i2i') ? (
                         <option value="grok-imagine-image-edit">Grok Imagine Edit — 图像编辑 (Super+)</option>
@@ -449,6 +458,17 @@ export default function ToolPanel() {
                     {kind === 't2v' && <option value="veo_t2v_lite">VEO 3.1 T2V Lite</option>}
                     {kind === 'i2v' && <option value="veo_i2v_lite">VEO 3.1 I2V Lite — 首帧</option>}
                     {kind === 'i2v' && <option value="veo_interpolation_lite">VEO 3.1 Interpolation Lite — 首尾帧</option>}
+                    <option disabled>──── Dreamina（即梦）────</option>
+                    {kind === 't2v' ? (
+                      <option value="dreamina/t2v-default">即梦 · text2video</option>
+                    ) : (
+                      <>
+                        <option value="dreamina/seedance2.0fast">即梦 · seedance 2.0 fast (720p · 推荐)</option>
+                        <option value="dreamina/seedance2.0">即梦 · seedance 2.0 标准 (720p)</option>
+                        <option value="dreamina/seedance2.0fast_vip">即梦 · seedance 2.0 fast · VIP (1080p)</option>
+                        <option value="dreamina/seedance2.0_vip">即梦 · seedance 2.0 · VIP (1080p)</option>
+                      </>
+                    )}
                     <option disabled>──── 第三方 · cc123.ai (Seedance / Sora) ────</option>
                     <option value="cc123/sd-2">cc123 · sd-2 (Seedance 2.0)</option>
                     <option value="cc123/sd-2-vip">cc123 · sd-2-vip (Seedance 2.0 · 队列优先)</option>

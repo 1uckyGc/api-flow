@@ -11,8 +11,11 @@ import time
 from typing import Callable, Optional
 
 from app.config import settings
+from pathlib import Path
+
 from app.services.ai_service import GenerationResult, ai_client
 from app.services.cc123_video_client import _aspect_to_orientation, get_cc123_client
+from app.services.dreamina_client import DreaminaClient
 from app.services.grok_client import grok_client
 from app.services.model_registry import resolve_provider, strip_provider_prefix, get_task_type
 from app.services.call_logger import record_api_call, complete_api_call
@@ -86,6 +89,12 @@ async def dispatch_generate(
             )
         elif provider == "cc123":
             result = await _run_cc123(
+                model=model, prompt=prompt,
+                image_paths=image_paths, config_json=cfg,
+                progress_callback=progress_callback,
+            )
+        elif provider == "dreamina":
+            result = await _run_dreamina(
                 model=model, prompt=prompt,
                 image_paths=image_paths, config_json=cfg,
                 progress_callback=progress_callback,
@@ -236,4 +245,133 @@ async def _run_cc123(
     # 跟 HOLO/Grok 流式下载约定保持一致
     result.success = True
     result.output_file_path = cc_result.local_video_path or ""
+    return result
+
+
+async def _run_dreamina(
+    model: str, prompt: str,
+    image_paths: Optional[list[str]],
+    config_json: dict,
+    progress_callback: Optional[Callable[[str], None]],
+) -> GenerationResult:
+    """Dreamina CLI 路径（subprocess + 轮询）。
+
+    model 形如 dreamina/<sub-spec>：
+      t2i-5.0 / t2i-4.6     → text2image（含 model_version 子档）
+      i2i-default           → image2image（用上传的图）
+      t2v-default           → text2video
+      seedance2.0fast 等    → image2video（i2v）
+
+    所有子命令通过 dreamina_client.DreaminaClient 包装的 subprocess 调用，
+    跑在 asyncio.to_thread 里避免阻塞 event loop。
+    """
+    result = GenerationResult()
+    client = DreaminaClient()
+
+    # 提前检查登录态
+    if not await asyncio.to_thread(client.is_logged_in):
+        result.success = False
+        result.error = "Dreamina CLI 未登录 — SSH 进 worker 容器跑 `dreamina login` 一次扫码授权"
+        return result
+
+    raw = strip_provider_prefix(model)  # e.g. "t2i-5.0" / "seedance2.0fast"
+
+    if progress_callback:
+        await progress_callback(f"提交 dreamina {raw}...")
+
+    # 子命令分发
+    if raw.startswith("t2i-"):
+        model_version = raw.split("-", 1)[1]  # "5.0" / "4.6" 等
+        ratio = config_json.get("aspect_ratio") or "1:1"
+        # 前端 resolution 字段: standard / 2k / 4k → dreamina: 1k / 2k / 4k
+        res_in = (config_json.get("resolution") or "1k").lower()
+        resolution_type = "1k" if res_in in ("standard", "1k", "") else res_in
+        dr = await asyncio.to_thread(
+            client.text2image,
+            prompt=prompt,
+            model_version=model_version,
+            ratio=ratio,
+            resolution_type=resolution_type,
+        )
+        if dr.success:
+            result.success = True
+            result.output_file_path = dr.local_image_path or ""
+        else:
+            result.success = False
+            result.error = dr.fail_reason or "dreamina text2image 失败"
+        return result
+
+    if raw.startswith("i2i-"):
+        img = (image_paths or [None])[0]
+        if not img:
+            result.success = False
+            result.error = "i2i 需要输入图"
+            return result
+        # 路径转绝对（worker 工作目录 /app）
+        if not os.path.isabs(img):
+            img = str(Path("/app") / img)
+        if not os.path.exists(img):
+            result.success = False
+            result.error = f"输入图文件不存在: {img}"
+            return result
+        dr = await asyncio.to_thread(
+            client.image2image,
+            image_path=img,
+            prompt=prompt,
+        )
+        if dr.success:
+            result.success = True
+            result.output_file_path = dr.local_image_path or ""
+        else:
+            result.success = False
+            result.error = dr.fail_reason or "dreamina image2image 失败"
+        return result
+
+    if raw.startswith("t2v-"):
+        dr = await asyncio.to_thread(
+            client.text2video,
+            prompt=prompt,
+        )
+        if dr.success:
+            result.success = True
+            result.output_file_path = dr.local_video_path or ""
+        else:
+            result.success = False
+            result.error = dr.fail_reason or "dreamina text2video 失败"
+        return result
+
+    # seedance2.0 / seedance2.0fast / *_vip → image2video
+    img = (image_paths or [None])[0]
+    if not img:
+        result.success = False
+        result.error = "seedance i2v 需要输入图"
+        return result
+    if not os.path.isabs(img):
+        img = str(Path("/app") / img)
+    if not os.path.exists(img):
+        result.success = False
+        result.error = f"输入图文件不存在: {img}"
+        return result
+
+    duration = int(config_json.get("seconds") or config_json.get("duration") or 15)
+    video_resolution = config_json.get("video_resolution") or "720p"
+    # 非 VIP 不支持 1080p，guard
+    if video_resolution != "720p" and "vip" not in raw:
+        logger.info(f"dreamina i2v: forcing video_resolution {video_resolution} → 720p (model {raw} not vip)")
+        video_resolution = "720p"
+
+    dr = await asyncio.to_thread(
+        client.image2video,
+        image_path=img,
+        prompt=prompt,
+        model_version=raw,
+        duration=duration,
+        video_resolution=video_resolution,
+    )
+    if dr.success:
+        result.success = True
+        result.output_file_path = dr.local_video_path or ""
+    else:
+        result.success = False
+        result.error = dr.fail_reason or "dreamina image2video 失败"
     return result

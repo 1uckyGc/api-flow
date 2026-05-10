@@ -29,7 +29,7 @@ HOLO_MODEL_PREFIXES = (
 # 例 "flow2api/veo_3_1_r2v_fast_portrait" 显式走 Flow2API，
 # 而 "veo_3_1_r2v_fast_portrait" 走 HOLO（前缀规则 "veo_3_"）。
 # cc123/ 用于第三方 Seedance 2.0（cc123.ai），跟即梦 dreamina 的同名 seedance2.0fast 区分
-EXPLICIT_PROVIDER_PREFIXES = ("flow2api/", "grok/", "holo/", "cc123/")
+EXPLICIT_PROVIDER_PREFIXES = ("flow2api/", "grok/", "holo/", "cc123/", "dreamina/")
 
 
 def resolve_provider(model: str, fallback: str = "holo") -> str:
