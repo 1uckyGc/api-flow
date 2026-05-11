@@ -16,20 +16,22 @@ logger = logging.getLogger(__name__)
 
 async def call_workflow_llm(model: str, system_prompt: str, user_prompt: str, count: int) -> list[str]:
     """通用的大模型分发处理 (扩写/变换)"""
-    api_key = settings.DEEPSEEK_API_KEY
-    base_url = settings.DEEPSEEK_API_URL
+    from app.services.ai_service import _llm_endpoint, _llm_supports_json_format, _extract_json_text
+    base_url, api_key, default_model = _llm_endpoint()
     if not api_key:
-        raise RuntimeError("系统未配置 DEEPSEEK_API_KEY")
+        raise RuntimeError("系统未配置 LLM API key")
 
+    use_model = default_model if not model else model
     payload = {
-        "model": settings.DEEPSEEK_MODEL if not model else model,
+        "model": use_model,
         "messages": [
             {"role": "system", "content": system_prompt or "你是一个创意助手，请按要求输出格式要求的JSON。"},
             {"role": "user", "content": f"{user_prompt}\n\n请严格返回包含 'prompts' 字符串数组的 JSON。如果需要 {count} 条方向，请在数组中放入 {count} 个字符串。示例: {{\"prompts\": [\"...\", \"...\"]}}"}
         ],
         "temperature": 0.8,
-        "response_format": {"type": "json_object"}
     }
+    if _llm_supports_json_format(use_model):
+        payload["response_format"] = {"type": "json_object"}
     
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -41,9 +43,9 @@ async def call_workflow_llm(model: str, system_prompt: str, user_prompt: str, co
         resp.raise_for_status()
         data = resp.json()
         content = data["choices"][0]["message"]["content"]
-        
+
         try:
-            parsed = json.loads(content)
+            parsed = json.loads(_extract_json_text(content))
             prompts = parsed.get("prompts", [])
             if not isinstance(prompts, list):
                 prompts = [str(prompts)]

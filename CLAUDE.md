@@ -9,7 +9,8 @@
 | **后端** | Python 3.10 · FastAPI · SQLAlchemy 2 · Alembic · Celery 5 |
 | **前端** | React 18 · Vite 5 · Zustand · TailwindCSS · React Router 6 |
 | **存储** | PostgreSQL 15（关系数据） · Redis 7（broker + result backend） |
-| **AI 网关** | **多家并存按模型名分发**：HOLO（`api.dealonhorizon.us`，异步轮询）、Flow2API（`followmeee.co`，OpenAI 兼容 SSE）、Grok2API（`grok-imagine-*`，多端点）、**PackyAPI**（`packyapi.com`，Gemini OpenAI 形态，复刻视频 LLM 用）、**Dreamina CLI**（即梦 v1.4.x，subprocess，4 个子命令对应 t2i/i2i/t2v/i2v）、**cc123.ai relay**（NewAPI fork，sd-2/sd-2-vip/sora-2 视频，OpenAI Sora compat /v1/video/generations）。`AI_PROVIDER` 仅作未命中模型时的兜底；DeepSeek 做提示词扩写 |
+| **AI 网关** | **多家并存按模型名分发**：HOLO（`api.dealonhorizon.us`，异步轮询，含 **HOLO Sora-2-12/16** OpenAI Sora 形态 i2v / t2v）、Flow2API（`followmeee.co`，OpenAI 兼容 SSE）、Grok2API（`grok-imagine-*`，多端点）、**PackyAPI**（`packyapi.com`，Gemini OpenAI 形态，复刻视频 LLM 用）、**Dreamina CLI**（即梦 v1.4.x，subprocess，4 个子命令对应 t2i/i2i/t2v/i2v）、**cc123.ai relay**（NewAPI fork，sd-2/sd-2-vip/sora-2 视频，OpenAI Sora compat /v1/video/generations）。`AI_PROVIDER` 仅作未命中模型时的兜底 |
+| **提示词 LLM** | **可切换 LLM provider**（`LLM_PROVIDER=deepseek\|doubao`，默认 deepseek）：DeepSeek-Chat（`api.deepseek.com`）/ **Doubao-Seed-2.0-lite**（火山引擎 ARK，`ark.cn-beijing.volces.com`，VLM 可读图）。fission / director / workflow 三处都过统一 `_llm_endpoint()` helper。Doubao 不支持 `response_format: json_object`，靠 system prompt 强制 JSON + `_extract_json_text()` 去 markdown 围栏兜底 |
 | **实时通信** | WebSocket（按用户分发，见 `backend/app/routers/ws.py`） |
 | **容器** | docker-compose，5 个服务（db / redis / backend / worker / frontend） |
 
@@ -49,9 +50,10 @@ backend/                    FastAPI 应用 + Celery worker
                               run_storyboard_llm (PackyAPI Gemini 跑 6 阶段 LLM)
                               run_video_via_dreamina (即梦 CLI 出 seedance2.0fast 视频，/replicate 专属)
                               run_video_via_cc123 (cc123.ai relay 出 sd-2/sora-2 视频，/replicate 专属)
-      cleanup_tasks.py      celery beat 两个清理任务：
+      cleanup_tasks.py      celery beat 三个清理任务：
                               03:30 purge_old_logs (30 天 ApiCallLog 行)
                               04:00 purge_old_artifacts (3 天 task_groups + 文件 + 前端记录 + replicate workdir rmtree)
+                              hourly :15 mark_zombie_running_failed (running/queued >2h 自动打 failed，刷新所属 group)
       celery_app.py         Celery 工厂 + beat schedule
     prompts.py              提示词模板中心（LLM + 图像）
     utils/                  scheduler（限流）/ file_cleanup / logger
@@ -151,10 +153,18 @@ alembic upgrade head
   - `GROK_API_URL/KEY` (`38.64.57.216:8001`)
   - `PACKYAPI_BASE_URL` (`https://www.packyapi.com`) + `PACKYAPI_GEMINI_KEY` —— 复刻视频 LLM 自动模式专用
   - `CC123_BASE_URL` (`https://cc123.ai`) + `CC123_API_KEY` —— 第三方视频生成（sd-2/sd-2-vip/sora-2）
+  - **`DEEPSEEK_API_URL/KEY/MODEL`** + **`DOUBAO_API_URL/KEY/MODEL`**（火山 ARK）+ **`LLM_PROVIDER=deepseek\|doubao`** —— fission / director / workflow 用的提示词 LLM；切 provider 只改 .env 这一处
   - Dreamina 不需要 API key（OAuth Device Flow 扫码登录，token 在 docker volume `dreamina_token`）
   - `system_settings.veo_api_key/gemini_api_key` 是 dead column，不再读
 - **模型名别名**：HOLO 不认 `*_ultra` / `*_ultra_relaxed` / `*_ultra_fl` 这些 Flow2API 时代命名。`ai_service.py::LEGACY_MODEL_ALIASES` 是兜底翻译表（旧名 → HOLO 实名，e.g. `_ultra_relaxed` → `lite`、`_ultra` → `fast`）。
 - **HOLO 失败语义**：HOLO 自动退款 `failed`/`cancelled` 任务，`_generate_holo` 在 `result` 上挂 `_terminal=True` + `_refunded`，`generate_with_retry` 看到 `_terminal` 立即早退（不走 3 次重试，避免内容策略失败烧配额）。同时 `_holo_task_id` / `_cost` 也通过 result 回传给 dispatcher 写入日志。
+- **HOLO Sora-2 必传 `size` 字段**：`Sora-2-12` / `Sora-2-16`（**严格大小写**，首字母大写 S；`normalize_holo_model` 不动 case）submit payload 必须显式带 `size: "1280x720"` 或 `"720x1280"`，否则上游 400 `size 必填`。`_generate_holo` 检测到 `model.lower().startswith("sora-")` 时自动注入：i2v 场景用 PIL 读 `image_paths[0]` 宽高决定横/竖；无图（纯 t2v）回落 720x1280 竖屏。其他比例（如 9:14、16:11）不支持，**只接受这两个固定值**。/i2v 工具箱下拉已挂 Sora-2-12 / Sora-2-16 两档。
+- **LLM provider 切换通过 `_llm_endpoint()` helper**。`ai_service.py` 三个 helper：
+  - `_llm_endpoint() -> (url, key, model)`：按 `settings.LLM_PROVIDER` 选 deepseek / doubao；**doubao key 空时自动回落 deepseek**，避免误操作切炸
+  - `_llm_supports_json_format(model)`：doubao 系列 + deepseek-reasoner 都不支持 `response_format: {"type": "json_object"}`，payload 构造前判断要不要带这字段
+  - `_extract_json_text(content)`：剥 LLM 输出周围的 markdown ```json``` 围栏，让 doubao 输出兼容现有 `json.loads()` 解析
+  - **三处复用**：`generate_fission_prompts` / `generate_director_scene_prompts` / `workflow_worker.call_workflow_llm` 全部走 helper，加新 provider 只需扩 `_llm_endpoint` 一处
+  - vision_keywords 加 `doubao` —— Doubao-Seed-2.0-lite 是 VLM，自动启用多模态 image_url + base64 协议（fission 一图一句话、director 产品图风格参考都能读图）
 - **ApiCallLog 是审计而非账单**。本地表只记"谁/什么时候/为什么调用了什么"，HOLO 的钱以 `/me/transactions` 官方接口为准。
   - `/api/logs` 路由按 `username == "admin"` 判管理员，能筛全用户；普通用户强制 `user_id=self`。
   - `/api/logs/balance` + `/api/logs/transactions` 是**账户级共享数据（同一把 HOLO key 的余额/账单），仅 admin 可访问**，普通用户 403；前端 `Logs.jsx` 检查 `is_admin` 后再渲染 provider 卡片网格和 HOLO 账单 Tab。
@@ -173,6 +183,8 @@ alembic upgrade head
   - **本地注册已禁用**：`POST /api/auth/register` 返回 410 Gone，账户统一在 https://followmeee.co/manage 管理。
   - **`is_admin` 判定**：`extract_is_admin(upstream)` 兼容多种 shape (`user.is_admin` / `user.role==admin` / 顶层 `is_admin`)；followmeee.co 实际响应字段如有变化，改这一个函数即可。
 - **docker-compose `env_file` 会对 `$` 做变量插值**。bcrypt hash 里的 `$2b$12$...` 必须在 `.env` 写成 `$$2b$$12$$...`（双写转义），否则 `$abc` 会被当作未设变量替换为空，hash 被破坏。同样适用任何含 `$` 的密码/token。
+- **`docker compose restart` 不重读 `.env`**。`restart` 只重启进程不重建容器，env_file 改了不会生效。改 `.env` 后必须 `docker compose up -d <service>` 强制 recreate；用 `docker exec <container> printenv KEY` 验证 env 真的进容器了。曾经接 Doubao 时设了 DOUBAO_API_KEY 但用 restart 死活读不到，debug 半天就是这个坑。
+- **frontend nginx 缓存 upstream DNS，backend 重启换 IP 必须连前端一起重启**。frontend 容器的 nginx `proxy_pass http://backend:8000/api/` 在**启动时**把 `backend` 解析成具体 IP（如 `172.18.0.3`）并写死，docker bridge 网络给 backend 重启时可能分新 IP（如 `172.18.0.6`）→ 前端往老 IP 打全 502 `connect() failed`。表现：用户点提交按钮**完全没反应**。修：`docker compose restart backend worker` 之后**一定要再 `docker restart followmeeeaigc_frontend`** 让 nginx 重新 DNS resolve；或者一次性 `docker compose up -d backend worker frontend` 让 compose 处理依赖。长期方案 nginx 加 `resolver 127.0.0.11 valid=5s;` + variable proxy_pass 可动态解析，但当前不动也行（注意运维 SOP）。
 - **Celery worker 用 `--pool=threads` 不是 prefork**。HOLO/Flow2API 调用是纯 IO-bound（HTTP 等待），prefork 模式每个 worker 是独立 Python 进程，~80MB baseline，c=100 直接吃 8GB → OOM；threads 池 1 进程 + N 线程，c=100 仅 ~80MB 总占用。现状已切 threads + `MAX_CONCURRENT_TASKS=100`（远程 154.51.41.140 实测稳定）。
   - 配套：`backend/app/database.py` `create_engine(... pool_size=30, max_overflow=20, pool_pre_ping=True, pool_recycle=300)` — 默认 5+10 不够 100 threads 同时拉连接，会 QueuePool overflow
   - threads 池不支持 `--max-memory-per-child`，用 `--max-tasks-per-child=200` 替代（每 worker 处理 200 任务后自动回收）
@@ -228,6 +240,17 @@ alembic upgrade head
   - 前端错误格式化：`frontend/src/pages/replicate/GUList.jsx::formatTaskError` 识别 3 类典型上游错误（cc123 quota / dreamina 未登录 / 1080p 不兼容）+ 拆 title/detail/hint 三行展示，不再灌 raw HTTP 响应进 GU 红条
 - **clipboard 兼容**：`frontend/src/utils/clipboard.js::copyToClipboard(text)` 双路径 —— 优先 `navigator.clipboard.writeText`（仅 HTTPS / localhost 可用），失败回退 `document.execCommand('copy')` + 隐藏 textarea。**因为生产是裸 HTTP** `http://154.51.41.140:8090/`，`navigator.clipboard` 整片不可用。所有"复制提示词 / 复制 JSON"按钮统一走这个 helper。
 - **静态挂载 30 天 immutable 缓存**。`/outputs` 和 `/uploads` 路径走 `add_cache_headers` 中间件，文件名是 UUID 所以这样安全。
+- **僵尸任务每小时自动清 + 按钮也清**。worker 崩溃/重启/网络断会留下 `status=running` 或 `queued` 永远不更新的"卡住"任务（UI 一直显示"生成中..."）。两层兜底：
+  - `cleanup_tasks.py::mark_zombie_running_failed` celery beat 每小时 `:15` 跑，把 `status in (running, queued) AND updated_at < now - 2h` 的 task 全部打 `failed` + `error_message="worker 长时间无响应（>2h），系统自动标记失败。可点重试。"` + 用 `update_group_status()` 刷新所属 group 状态
+  - `DELETE /api/tasks/failed/clear/all` 用户按钮**同时清 failed + 僵尸**（>2h running/queued），返回 `{failed: N, zombies: M, message}`。前端 `EndlessGallery.jsx::clearFailedTasks` 调用，自动清空组 cascade
+  - 历史教训：2026-05-10 worker 因 `ImportError: stream_download_to_file` 持续崩溃留下 128 个 running zombie，用户看着卡片不动也清不掉；那次手工 SQL 批量打 failed 后才发现需要这两层兜底
+- **EndlessGallery 高密度模式（≥10 列自动紧凑）**。`/t2i /i2i /t2v /i2v` 共用画廊组件，列数控制器从 `[3,4,5,6,7,8]` 扩到 `[4,6,8,10,12,14]`。`isCompact = columnCount >= 10` 推导值控制：
+  - cell 圆角 `rounded-xl` → `rounded-md`、阴影 `shadow-md` → `shadow-sm`、hover 阴影 `_12px_40px` → `_4px_16px`
+  - aspectRatio 压扁：9:16 → 9/14（高度 -12.5%）、16:9 → 16/11（-22%）；1:1 不变
+  - 底部信息条 `p-2.5` → `p-1.5`、隐藏第二行模型名、prompt 字号 `text-[11px]` → `text-[10px]`、延展徽章 `text-[9px]` → `text-[8px]`
+  - pending/failed 状态的 Sparkles/Clock(24px) 和 AlertTriangle(28px) 紧凑模式下分别压到 16/18px
+  - 外层 padding + grid gap 三档动态：≥10 列 `p-2 + gap-1.5`；≥8 列 `p-3 + gap-2.5`；其它 `p-4 + gap-4`
+  - **不动**：列数 state / `localStorage.endless_gallery_cols` 持久化逻辑 / 其它页面 / 后端。老用户存的 3/5/7 仍能渲染但下次点按钮就映射到新档
 - **3 天滚动清理 task_groups + 文件 + 前端记录**。`workers/cleanup_tasks.py::purge_old_artifacts` 每天 04:00 跑：
   - 删 `created_at < now - 3d` 的 task_groups（cascade 级联删 sub tasks）
   - 物理删 `task.output_file` / `output_thumbnail` / `input_files` / `task_group.config_json["anchor_file"]`
@@ -238,7 +261,7 @@ alembic upgrade head
   - **ApiCallLog 保留**：`task_id` / `group_id` FK 置 NULL，账单审计行不删（30 天那条规则单独管）
   - 服务器稳态磁盘 ≈ 3 天产出量（~5GB），永不爆。前端任务列表 3 天后自动消失（DB 行被删）。
   - 手动触发：`docker exec followmeeeaigc_worker python -c "from app.workers.cleanup_tasks import purge_old_artifacts; print(purge_old_artifacts())"`
-- **Toolbox 下拉的真正实现是 `Utility/ToolPanel.jsx`**（不是 `Toolbox/Toolbox.jsx`）。`/t2i /i2i /t2v /i2v` 全部走 ToolPanel 的硬编码 option 列表 + 三 provider optgroup 分组渲染。改下拉**只改 ToolPanel.jsx**。
+- **Toolbox 下拉的真正实现是 `Utility/ToolPanel.jsx`**（不是 `Toolbox/Toolbox.jsx`）。`/t2i /i2i /t2v /i2v` 全部走 ToolPanel 的硬编码 option 列表 + 多 provider optgroup 分组渲染（HOLO / HOLO·Sora 2 / Flow2API / Dreamina（即梦）/ cc123 / Grok）。改下拉**只改 ToolPanel.jsx**。
 - **Windows + Docker Desktop rebuild 前端时的两个坑**：
   - rebuild 后只 recreate frontend 才能生效：`docker compose up -d --force-recreate --no-deps frontend`
   - BuildKit 多阶段缓存有时复用旧 dist。改源码 vite hash 不变 = build context 没拿到新文件，先 `docker buildx prune -af` 或临时 `DOCKER_BUILDKIT=0 docker compose build --no-cache frontend` 用经典 builder

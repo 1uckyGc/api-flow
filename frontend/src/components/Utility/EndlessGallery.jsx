@@ -39,6 +39,7 @@ export default function EndlessGallery() {
     const saved = localStorage.getItem('endless_gallery_cols');
     return saved ? parseInt(saved, 10) : 5;
   });
+  const isCompact = columnCount >= 10;
 
   useEffect(() => {
     localStorage.setItem('endless_gallery_cols', columnCount.toString());
@@ -540,12 +541,12 @@ export default function EndlessGallery() {
           </span>
           {/* 列数控制器 */}
           <div className="flex items-center gap-1 ml-3 p-0.5 rounded-lg" style={{ background: 'var(--surface-2)', border: '1px solid var(--border-subtle)' }}>
-            {[3, 4, 5, 6, 7, 8].map(n => (
+            {[4, 6, 8, 10, 12, 14].map(n => (
               <button
                 key={n}
                 onClick={() => setColumnCount(n)}
                 title={`每行 ${n} 列`}
-                className="text-[10px] font-bold w-6 h-5 rounded transition-all leading-none"
+                className="text-[9px] font-bold w-5 h-5 rounded transition-all leading-none"
                 style={{
                   background: columnCount === n ? 'var(--accent)' : 'transparent',
                   color: columnCount === n ? '#fff' : 'var(--text-tertiary)',
@@ -609,8 +610,8 @@ export default function EndlessGallery() {
       </header>
 
       {/* Waterfall gallery */}
-      <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
-        <div className="grid gap-4 pb-12" style={{ gridTemplateColumns: `repeat(${columnCount}, minmax(0, 1fr))` }}>
+      <div className={`flex-1 overflow-y-auto custom-scrollbar ${columnCount >= 10 ? 'p-2' : columnCount >= 8 ? 'p-3' : 'p-4'}`}>
+        <div className={`grid pb-12 ${columnCount >= 10 ? 'gap-1.5' : columnCount >= 8 ? 'gap-2.5' : 'gap-4'}`} style={{ gridTemplateColumns: `repeat(${columnCount}, minmax(0, 1fr))` }}>
           {allCards.slice(0, visibleCount).map((card) => {
             const isDone = card.status === 'SUCCESS' || card.status === 'success';
             const isFailed = card.status === 'FAILED' || card.status === 'failed';
@@ -638,9 +639,14 @@ export default function EndlessGallery() {
                   const v = e.currentTarget.querySelector('video');
                   if (v) v.pause();
                 }}
-                className={`group relative rounded-xl overflow-hidden shadow-md flex flex-col w-full transition-[box-shadow,border-color] duration-300 ${selectionMode ? 'cursor-pointer' : (isDone ? 'cursor-pointer' : '')} ${selectedTasks.has(card.id) ? 'border-2 border-emerald-500 ring-2 ring-emerald-500/30 scale-[0.98]' : (isFailed ? 'ring-2 ring-red-500/50' : 'border-2 border-transparent hover:border-[var(--border-strong)] hover:shadow-[0_12px_40px_rgba(0,0,0,0.3)]')}`}
+                className={`group relative ${isCompact ? 'rounded-md shadow-sm' : 'rounded-xl shadow-md'} overflow-hidden flex flex-col w-full transition-[box-shadow,border-color] duration-300 ${selectionMode ? 'cursor-pointer' : (isDone ? 'cursor-pointer' : '')} ${selectedTasks.has(card.id) ? 'border-2 border-emerald-500 ring-2 ring-emerald-500/30 scale-[0.98]' : (isFailed ? 'ring-2 ring-red-500/50' : `border-2 border-transparent hover:border-[var(--border-strong)] ${isCompact ? 'hover:shadow-[0_4px_16px_rgba(0,0,0,0.25)]' : 'hover:shadow-[0_12px_40px_rgba(0,0,0,0.3)]'}`)}`}
                 style={{
-                  aspectRatio: card.groupConfig?.aspectRatio === '16:9' ? '16/9' : card.groupConfig?.aspectRatio === '1:1' ? '1/1' : '9/16',
+                  aspectRatio: (() => {
+                    const ar = card.groupConfig?.aspectRatio;
+                    if (ar === '16:9') return isCompact ? '16/11' : '16/9';
+                    if (ar === '1:1') return '1/1';
+                    return isCompact ? '9/14' : '9/16';
+                  })(),
                   background: 'var(--surface-2)',
                 }}
               >
@@ -667,15 +673,15 @@ export default function EndlessGallery() {
                       className={`w-full h-full flex flex-col items-center justify-center p-3 ${isFailed ? 'bg-gradient-to-br from-red-900/30 to-gray-900' : 'bg-gradient-to-br from-indigo-900/40 to-gray-800'}`}
                     >
                         {isPending && (
-                          <div className="mb-2">
+                          <div className={isCompact ? 'mb-1' : 'mb-2'}>
                             {taskProgressMap?.[card.id] ? (
-                              <Sparkles size={24} className="animate-pulse drop-shadow-lg" style={{ color: 'var(--accent-hover)' }} />
+                              <Sparkles size={isCompact ? 16 : 24} className="animate-pulse drop-shadow-lg" style={{ color: 'var(--accent-hover)' }} />
                             ) : (
-                              <Clock size={24} className="animate-[spin_3s_linear_infinite] drop-shadow-md opacity-80" style={{ color: 'var(--text-tertiary)' }} />
+                              <Clock size={isCompact ? 16 : 24} className="animate-[spin_3s_linear_infinite] drop-shadow-md opacity-80" style={{ color: 'var(--text-tertiary)' }} />
                             )}
                           </div>
                         )}
-                        {isFailed && <AlertTriangle size={28} className="mb-2 text-red-400" />}
+                        {isFailed && <AlertTriangle size={isCompact ? 18 : 28} className={`text-red-400 ${isCompact ? 'mb-1' : 'mb-2'}`} />}
                         
                         <div className="text-center w-full px-1 flex flex-col items-center">
                           {isFailed ? (
@@ -745,18 +751,20 @@ export default function EndlessGallery() {
                 </div>
 
                 {/* Bottom info bar */}
-                <div className="absolute bottom-0 w-full p-2.5 bg-gradient-to-t from-black/80 via-black/40 to-transparent">
-                  <div className="flex items-center gap-2 truncate">
+                <div className={`absolute bottom-0 w-full bg-gradient-to-t from-black/80 via-black/40 to-transparent ${isCompact ? 'p-1.5' : 'p-2.5'}`}>
+                  <div className={`flex items-center truncate ${isCompact ? 'gap-1' : 'gap-2'}`}>
                     {card.groupConfig?.isExtension && (
-                      <span className="bg-amber-500 text-white text-[9px] font-bold px-1.5 py-0.5 rounded flex-shrink-0">延展</span>
+                      <span className={`bg-amber-500 text-white font-bold rounded flex-shrink-0 ${isCompact ? 'text-[8px] px-1 py-0' : 'text-[9px] px-1.5 py-0.5'}`}>延展</span>
                     )}
-                    <p className="text-[11px] text-white font-medium truncate" title={card.prompt || card.groupPrompt}>
+                    <p className={`text-white font-medium truncate ${isCompact ? 'text-[10px]' : 'text-[11px]'}`} title={card.prompt || card.groupPrompt}>
                       {card.prompt || card.groupPrompt || '生成任务'}
                     </p>
                   </div>
-                  <p className="text-[9px] text-white/50 mt-0.5 truncate">
-                    {card.groupConfig?.model?.split('_').slice(0, 3).join(' ') || '模型'}
-                  </p>
+                  {!isCompact && (
+                    <p className="text-[9px] text-white/50 mt-0.5 truncate">
+                      {card.groupConfig?.model?.split('_').slice(0, 3).join(' ') || '模型'}
+                    </p>
+                  )}
                 </div>
 
                 {/* Checkbox：选择模式下常驻；非选择模式下鼠标悬停 or 已选中时显示 */}

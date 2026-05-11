@@ -276,19 +276,31 @@ def clear_failed_tasks(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """一键清除当前用户所有处于 FAILED 状态的任务及其幽灵空壳组"""
+    """一键清除当前用户的失败任务 + 长时间无响应的僵尸任务（running/queued >2h）+ 幽灵空壳组。"""
+    from datetime import datetime, timedelta
+    zombie_cutoff = datetime.utcnow() - timedelta(hours=2)
+
+    # 1. 真 FAILED
     failed_tasks = db.query(Task).filter(
         Task.user_id == current_user.id,
         Task.status == TaskStatus.FAILED
     ).all()
-    
-    count = len(failed_tasks)
-    remove_tasks_outputs(failed_tasks)
-    for task in failed_tasks:
+
+    # 2. 僵尸 RUNNING/QUEUED >2h（worker 崩溃/网络断、永远卡住的任务）
+    zombie_tasks = db.query(Task).filter(
+        Task.user_id == current_user.id,
+        Task.status.in_([TaskStatus.RUNNING, TaskStatus.QUEUED]),
+        Task.updated_at < zombie_cutoff,
+    ).all()
+
+    to_delete = failed_tasks + zombie_tasks
+    count = len(to_delete)
+    remove_tasks_outputs(to_delete)
+    for task in to_delete:
         db.delete(task)
-    
+
     db.commit()
-    
+
     # 清理掉因为删除子任务而彻底变空的闲置批次组
     empty_groups = db.query(TaskGroup).filter(
         TaskGroup.user_id == current_user.id,
@@ -296,9 +308,13 @@ def clear_failed_tasks(
     ).all()
     for g in empty_groups:
         db.delete(g)
-        
+
     db.commit()
-    return {"message": f"Successfully deleted {count} failed tasks and cleaned empty groups"}
+    return {
+        "message": f"Successfully deleted {count} tasks ({len(failed_tasks)} failed + {len(zombie_tasks)} zombie) and cleaned empty groups",
+        "failed": len(failed_tasks),
+        "zombies": len(zombie_tasks),
+    }
 
 @router.delete("/item/{task_id}", status_code=status.HTTP_200_OK)
 async def delete_single_task(

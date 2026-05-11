@@ -115,6 +115,46 @@ def normalize_holo_model(model: str) -> str:
     return model
 
 
+def _llm_endpoint() -> tuple[str, str, str]:
+    """根据 settings.LLM_PROVIDER 选 LLM (url, api_key, model)。
+
+    支持：
+      - deepseek（默认）— DeepSeek-Chat
+      - doubao         — 火山引擎 ARK / Doubao-Seed-2.0-lite，OpenAI 兼容 chat.completions
+    缺失 key 时回落到 DeepSeek，避免空 key 直接炸。
+    """
+    p = (getattr(settings, "LLM_PROVIDER", "") or "deepseek").lower()
+    if p == "doubao" and settings.DOUBAO_API_KEY:
+        return settings.DOUBAO_API_URL, settings.DOUBAO_API_KEY, settings.DOUBAO_MODEL
+    return settings.DEEPSEEK_API_URL, settings.DEEPSEEK_API_KEY, settings.DEEPSEEK_MODEL
+
+
+def _llm_supports_json_format(model: str) -> bool:
+    """部分模型（Doubao 系列、deepseek-reasoner）不支持 response_format: json_object。
+    对它们 payload 里不带这个字段，靠 system prompt 强制 JSON + 解析时去 markdown 围栏。
+    """
+    m = (model or "").lower()
+    if "doubao" in m:
+        return False
+    if "reasoner" in m:
+        return False
+    return True
+
+
+_JSON_FENCE_RE = re.compile(r'^```(?:json|JSON)?\s*\n?(.*?)\n?```\s*$', re.DOTALL)
+
+
+def _extract_json_text(text: str) -> str:
+    """剥离 LLM 输出周围的 markdown ```json``` 围栏，返回内部 JSON 文本。"""
+    if not text:
+        return text
+    s = text.strip()
+    m = _JSON_FENCE_RE.match(s)
+    if m:
+        return m.group(1).strip()
+    return s
+
+
 def get_mime_type(image_path: str) -> str:
     ext = os.path.splitext(image_path)[1].lower()
     mime_map = {
@@ -315,6 +355,19 @@ class AIClient:
         try:
             messages = await self._build_messages(prompt, image_paths)
             payload = {"model": model, "messages": messages}
+
+            # Sora-2 系列要求显式 size（仅支持 1280x720 / 720x1280）
+            if model.lower().startswith("sora-"):
+                size = "720x1280"  # 默认竖屏
+                if image_paths:
+                    try:
+                        from PIL import Image
+                        with Image.open(image_paths[0]) as im:
+                            w, h = im.size
+                            size = "1280x720" if w >= h else "720x1280"
+                    except Exception as e:
+                        logger.warning(f"Sora-2 size 推断失败，回落 720x1280: {e}")
+                payload["size"] = size
 
             # --- 1. SUBMIT ---
             if progress_callback:
@@ -661,13 +714,13 @@ async def generate_fission_prompts(global_prompt: str, count: int, image_paths: 
         LLM_REASONER_FORMAT_PROMPT
     )
     
-    api_key = settings.DEEPSEEK_API_KEY
+    llm_url, api_key, llm_model = _llm_endpoint()
     if not api_key:
-        logger.error("DEEPSEEK_API_KEY is not configured.")
-        raise RuntimeError("系统未配置 DEEPSEEK_API_KEY，无法执行裂变推理")
+        logger.error("LLM API key 未配置 (LLM_PROVIDER=%s)", getattr(settings, "LLM_PROVIDER", "deepseek"))
+        raise RuntimeError("系统未配置 LLM API key，无法执行裂变推理")
 
     if progress_callback:
-        await progress_callback("DeepSeek 推理引擎已启动，正在分析全局需求...")
+        await progress_callback("推理引擎已启动，正在分析全局需求...")
 
     # 1. 组装 Prompt
     system_msg = LLM_SYSTEM_PROMPT.replace("{count}", str(count))
@@ -680,10 +733,10 @@ async def generate_fission_prompts(global_prompt: str, count: int, image_paths: 
 
     prompt_context = "\n".join(user_msg_parts)
     messages = [{"role": "system", "content": system_msg}]
-    
-    # 协议能力判定：仅当模型名包含 vision/vl/gemini/gpt-4o 等关键字时才启用多模态 Image 协议
-    vision_keywords = ["vision", "vl", "gemini", "gpt-4o", "claude"]
-    is_vision_model = any(k in settings.DEEPSEEK_MODEL.lower() for k in vision_keywords)
+
+    # 协议能力判定：仅当模型名包含 vision/vl/gemini/gpt-4o/doubao 等关键字时才启用多模态
+    vision_keywords = ["vision", "vl", "gemini", "gpt-4o", "claude", "doubao"]
+    is_vision_model = any(k in llm_model.lower() for k in vision_keywords)
 
     if image_paths and is_vision_model:
         # 构造多模态内容 (如用户所述：Text 居首，多 Image 紧随其后)
@@ -704,18 +757,19 @@ async def generate_fission_prompts(global_prompt: str, count: int, image_paths: 
         messages.append({"role": "user", "content": prompt_context})
 
     payload = {
-        "model": settings.DEEPSEEK_MODEL,
+        "model": llm_model,
         "messages": messages,
         "temperature": 0.8,
         "stream": False,
-        "response_format": {"type": "json_object"}
     }
-    
+    if _llm_supports_json_format(llm_model):
+        payload["response_format"] = {"type": "json_object"}
+
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
-    
+
     if progress_callback:
         await progress_callback("正在构思创意方案，注入光影与构图细节...")
 
@@ -724,8 +778,8 @@ async def generate_fission_prompts(global_prompt: str, count: int, image_paths: 
     for attempt in range(retries):
         try:
             resp = await _ds_client.post(
-                settings.DEEPSEEK_API_URL, 
-                headers=headers, 
+                llm_url,
+                headers=headers,
                 json=payload
             )
             resp.raise_for_status()
@@ -735,7 +789,7 @@ async def generate_fission_prompts(global_prompt: str, count: int, image_paths: 
                 await progress_callback(f"正在对 {count} 个裂变变体进行文本对齐与质量校验...")
 
             content = data["choices"][0]["message"]["content"]
-            parsed = json.loads(content)
+            parsed = json.loads(_extract_json_text(content))
             prompts_list = parsed.get("prompts", [])
             
             if not prompts_list:
@@ -753,17 +807,17 @@ async def generate_fission_prompts(global_prompt: str, count: int, image_paths: 
             return prompts_list
                 
         except Exception as e:
-            logger.warning(f"DeepSeek generation attempt {attempt + 1} failed: {e}")
+            logger.warning(f"LLM ({llm_model}) generation attempt {attempt + 1} failed: {e}")
             if progress_callback:
                 await progress_callback(f"尝试第 {attempt+1} 次重连推理引擎...")
             # 如果是 JSON 解析错，尝试给下一轮加上 Reasoner 强约束
             payload["messages"].append({
-                "role": "user", 
+                "role": "user",
                 "content": LLM_REASONER_FORMAT_PROMPT
             })
-            
+
     logger.error("All attempts to generate fission prompts failed.")
-    raise RuntimeError("DeepSeek 引擎响应超时或格式错误，无法生成创意分身")
+    raise RuntimeError("LLM 引擎响应超时或格式错误，无法生成创意分身")
 
 
 async def generate_director_scene_prompts(
@@ -781,9 +835,9 @@ async def generate_director_scene_prompts(
     """
     from app.prompts import DIRECTOR_LLM_SYSTEM_PROMPT
 
-    api_key = settings.DEEPSEEK_API_KEY
+    llm_url, api_key, llm_model = _llm_endpoint()
     if not api_key:
-        raise RuntimeError("系统未配置 DEEPSEEK_API_KEY，无法执行导演模式剧本解析")
+        raise RuntimeError("系统未配置 LLM API key，无法执行导演模式剧本解析")
 
     if progress_callback:
         await progress_callback("导演引擎启动，正在解析剧本结构...")
@@ -800,8 +854,8 @@ async def generate_director_scene_prompts(
 
     messages = [{"role": "system", "content": system_msg}]
 
-    vision_keywords = ["vision", "vl", "gemini", "gpt-4o", "claude"]
-    is_vision_model = any(k in settings.DEEPSEEK_MODEL.lower() for k in vision_keywords)
+    vision_keywords = ["vision", "vl", "gemini", "gpt-4o", "claude", "doubao"]
+    is_vision_model = any(k in llm_model.lower() for k in vision_keywords)
 
     if product_image_paths and is_vision_model:
         content_parts: list[dict] = [{"type": "text", "text": user_msg}]
@@ -820,12 +874,13 @@ async def generate_director_scene_prompts(
         messages.append({"role": "user", "content": user_msg})
 
     payload = {
-        "model": settings.DEEPSEEK_MODEL,
+        "model": llm_model,
         "messages": messages,
         "temperature": 0.75,
         "stream": False,
-        "response_format": {"type": "json_object"},
     }
+    if _llm_supports_json_format(llm_model):
+        payload["response_format"] = {"type": "json_object"}
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -838,11 +893,11 @@ async def generate_director_scene_prompts(
     async with httpx.AsyncClient(timeout=60.0) as client:
         for attempt in range(retries):
             try:
-                resp = await client.post(settings.DEEPSEEK_API_URL, headers=headers, json=payload)
+                resp = await client.post(llm_url, headers=headers, json=payload)
                 resp.raise_for_status()
                 data = resp.json()
                 content = data["choices"][0]["message"]["content"]
-                parsed = json.loads(content)
+                parsed = json.loads(_extract_json_text(content))
                 scenes = parsed.get("scenes", [])
                 
                 # 显式排序：核心修复，确保 index 对应列表物理位置
@@ -870,4 +925,4 @@ async def generate_director_scene_prompts(
                         "content": "请务必仅返回 JSON 格式数据，确保可被 json.loads 解析。"
                     })
 
-    raise RuntimeError("DeepSeek 导演引擎响应超时或格式错误，无法解析剧本分镜")
+    raise RuntimeError("LLM 导演引擎响应超时或格式错误，无法解析剧本分镜")

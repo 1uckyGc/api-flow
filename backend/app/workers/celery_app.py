@@ -37,5 +37,9 @@ celery_app.conf.update(
             "task": "app.workers.cleanup_tasks.purge_old_artifacts",
             "schedule": crontab(hour=4, minute=0),  # 每天凌晨 04:00 — 3 天滚动清任务/文件/前端记录
         },
+        "mark-zombie-running-failed": {
+            "task": "app.workers.cleanup_tasks.mark_zombie_running_failed",
+            "schedule": crontab(minute=15),  # 每小时 :15 — 把 running/queued >2h 的任务打 failed
+        },
     },
 )

@@ -1,8 +1,9 @@
 """定时清理任务。
 
-两个 Celery Beat 调度：
+三个 Celery Beat 调度：
 - purge_old_logs: 每天 03:30，清 30 天以前的 ApiCallLog 行
 - purge_old_artifacts: 每天 04:00，清 3 天以前的任务（文件 + DB 行 + 前端记录）
+- mark_zombie_running_failed: 每小时 :15，把 running/queued >2h 没更新的任务打成 failed
 
 清理决策（用户已确认 A1 + B2 + C1）:
   A1: status=RUNNING 永远不删；QUEUED/RETRY 超 3 天视为僵尸一并删
@@ -176,6 +177,62 @@ def purge_old_artifacts() -> dict:
     except Exception as e:
         db.rollback()
         logger.error(f"purge_old_artifacts failed: {e}")
+        return {"error": str(e)}
+    finally:
+        db.close()
+
+
+ZOMBIE_HOURS = 2
+
+
+@celery_app.task(name="app.workers.cleanup_tasks.mark_zombie_running_failed")
+def mark_zombie_running_failed() -> dict:
+    """把 status=running/queued 但 updated_at < now-2h 的任务统一打成 failed。
+
+    用途：worker 崩溃/重启/网络断后会留下 RUNNING/QUEUED 状态的"卡住"任务，
+    它们既不出图也不报错，UI 永远显示"生成中..."。本任务定期扫一遍兜底。
+    """
+    cutoff = datetime.utcnow() - timedelta(hours=ZOMBIE_HOURS)
+    db = SessionLocal()
+    try:
+        zombies = db.query(Task).filter(
+            Task.status.in_([TaskStatus.RUNNING, TaskStatus.QUEUED]),
+            Task.updated_at < cutoff,
+        ).all()
+        if not zombies:
+            return {"marked": 0, "cutoff": cutoff.isoformat()}
+
+        msg = f"worker 长时间无响应（>{ZOMBIE_HOURS}h），系统自动标记失败。可点重试。"
+        now = datetime.utcnow()
+        for t in zombies:
+            t.status = TaskStatus.FAILED
+            t.error_message = msg
+            t.updated_at = now
+        group_ids = list({t.group_id for t in zombies if t.group_id})
+        db.commit()
+
+        # 同步刷新组状态。复用 workers.tasks.update_group_status（延迟 import 避免循环依赖）
+        try:
+            from app.workers.tasks import update_group_status
+            for gid in group_ids:
+                try:
+                    update_group_status(db, gid)
+                except Exception as e:
+                    logger.warning(f"mark_zombie: group {gid} status refresh failed: {e}")
+            db.commit()
+        except Exception as e:
+            logger.warning(f"mark_zombie: skipped group refresh ({e})")
+
+        result = {
+            "marked": len(zombies),
+            "groups_refreshed": len(group_ids),
+            "cutoff": cutoff.isoformat(),
+        }
+        logger.info(f"mark_zombie_running_failed: {result}")
+        return result
+    except Exception as e:
+        db.rollback()
+        logger.error(f"mark_zombie_running_failed failed: {e}")
         return {"error": str(e)}
     finally:
         db.close()

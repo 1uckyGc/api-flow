@@ -51,6 +51,14 @@ class Settings(BaseSettings):
     DEEPSEEK_API_KEY: str = ""
     DEEPSEEK_API_URL: str = "https://api.deepseek.com/chat/completions"
     DEEPSEEK_MODEL: str = "deepseek-chat"
+
+    # 火山引擎 ARK (Doubao) — 备选 LLM，OpenAI 兼容 /v1/chat/completions
+    DOUBAO_API_KEY: str = ""
+    DOUBAO_API_URL: str = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
+    DOUBAO_MODEL: str = "doubao-seed-2-0-lite-260428"
+
+    # 提示词扩写 / 导演拆分镜 LLM 选择：deepseek（默认）/ doubao
+    LLM_PROVIDER: str = "deepseek"
     
     # Grok2API (grok2api gateway service)
     GROK_API_URL: str = "http://localhost:8001"
