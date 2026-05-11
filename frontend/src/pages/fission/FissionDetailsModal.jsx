@@ -1,10 +1,12 @@
 import React from 'react';
 import { X, Activity, Terminal, Layers, Settings, FileCode, Cpu, Clock, Fingerprint, ShieldCheck } from 'lucide-react';
+import { diffWords } from 'diff';
 
 export default function FissionDetailsModal({ job, onClose }) {
   if (!job) return null;
   const fissionPrompts = job.config_json?.fission_prompts || [];
   const tasks = job.tasks || [];
+  const originalPrompt = job.global_prompt || "";
   
   return (
     <div className="fixed inset-0 z-[150] flex items-center justify-center p-4 md:p-8"
@@ -108,17 +110,49 @@ export default function FissionDetailsModal({ job, onClose }) {
               </div>
 
               {fissionPrompts.length > 0 ? (
-                <div className="grid gap-3">
-                  {fissionPrompts.map((p, i) => (
-                    <div key={i} className="bg-[var(--surface-2)] border border-fuchsia-500/10 rounded-xl p-4 flex gap-4 hover:border-fuchsia-500/30 transition-all group">
-                      <div className="shrink-0 w-6 h-6 rounded-lg bg-fuchsia-500/10 text-fuchsia-400 flex items-center justify-center font-mono text-[10px] font-bold">
-                        {String(i + 1).padStart(2, '0')}
+                <div className="space-y-6">
+                  {fissionPrompts.map((revised, i) => {
+                    const segments = diffWords(originalPrompt, revised || "");
+                    return (
+                      <div key={i} className="border border-fuchsia-500/15 rounded-2xl overflow-hidden">
+                        <div className="bg-fuchsia-500/10 px-4 py-2 flex items-center gap-2 border-b border-fuchsia-500/20">
+                          <div className="shrink-0 w-5 h-5 rounded bg-fuchsia-500/20 text-fuchsia-300 flex items-center justify-center font-mono text-[10px] font-bold">
+                            {String(i + 1).padStart(2, '0')}
+                          </div>
+                          <span className="text-[10px] text-fuchsia-300 font-bold uppercase tracking-wider">变体 #{i + 1}</span>
+                          <span className="ml-auto text-[10px] text-fuchsia-400/70">
+                            红=删除 · 绿=新增 · 灰=保留
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-2 divide-x divide-fuchsia-500/10">
+                          <div className="p-4 text-xs leading-relaxed">
+                            <div className="text-[10px] text-[var(--text-tertiary)] mb-2 font-mono uppercase">STEP 01 · 原始模板</div>
+                            <div className="text-[var(--text-secondary)]">
+                              {segments.map((s, idx) => {
+                                if (s.added) return null;
+                                if (s.removed) {
+                                  return <span key={idx} className="bg-red-500/20 text-red-300 line-through px-0.5 rounded-sm">{s.value}</span>;
+                                }
+                                return <span key={idx}>{s.value}</span>;
+                              })}
+                            </div>
+                          </div>
+                          <div className="p-4 text-xs leading-relaxed">
+                            <div className="text-[10px] text-[var(--text-tertiary)] mb-2 font-mono uppercase">STEP 02 · Doubao 洗稿</div>
+                            <div className="text-[var(--text-secondary)]">
+                              {segments.map((s, idx) => {
+                                if (s.removed) return null;
+                                if (s.added) {
+                                  return <span key={idx} className="bg-emerald-500/20 text-emerald-300 px-0.5 rounded-sm">{s.value}</span>;
+                                }
+                                return <span key={idx}>{s.value}</span>;
+                              })}
+                            </div>
+                          </div>
+                        </div>
                       </div>
-                      <p className="text-xs text-[var(--text-secondary)] leading-normal group-hover:text-[var(--text-primary)] transition-colors">
-                        {p}
-                      </p>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               ) : (
                 <div className="p-8 border border-dashed border-[var(--border-subtle)] rounded-2xl text-center">

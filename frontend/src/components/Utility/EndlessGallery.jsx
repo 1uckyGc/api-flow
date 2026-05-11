@@ -154,18 +154,21 @@ export default function EndlessGallery() {
   };
 
   const handleBatchDelete = async () => {
-    if (selectedTasks.size === 0) return;
-    if (!window.confirm(`确定要批量删除选中的 ${selectedTasks.size} 个任务吗？`)) return;
-    
+    if (selectedTasks.size === 0) return alert('请先勾选要删除的任务');
+    const n = selectedTasks.size;
+    if (!window.confirm(`确定要批量删除选中的 ${n} 个任务吗？该操作不可逆。`)) return;
+
     setBatching(true);
     try {
-      await api.post('/tasks/batch-delete', Array.from(selectedTasks));
+      const res = await api.post('/tasks/batch-delete', Array.from(selectedTasks));
       setSelectedTasks(new Set());
       setSelectionMode(false);
-      fetchTaskGroups();
+      await fetchTaskGroups();
+      alert(res.data?.message ? `已删除 ${n} 个任务` : `已删除 ${n} 个任务（无后端消息）`);
     } catch (e) {
       console.error("Batch delete failed", e);
-      alert("批量删除失败");
+      const msg = e.response?.data?.detail || e.message || '未知错误';
+      alert(`批量删除失败：${msg}`);
     } finally {
       setBatching(false);
     }
@@ -500,10 +503,18 @@ export default function EndlessGallery() {
   const clearFailedTasks = async () => {
     if (!window.confirm("确定要一键清除所有失败的任务记录吗？该操作不可逆。")) return;
     try {
-      await api.delete('/tasks/failed/clear/all');
+      const res = await api.delete('/tasks/failed/clear/all');
+      const { failed = 0, zombies = 0 } = res.data || {};
       await fetchTaskGroups();
+      if (failed === 0 && zombies === 0) {
+        alert('当前用户没有失败/僵尸任务可清。\n如果界面仍显示红色卡片，可能是其它用户的任务（admin 视图）或本地缓存，刷新页面再看。');
+      } else {
+        alert(`已清除 ${failed} 条失败 + ${zombies} 条僵尸任务。`);
+      }
     } catch (error) {
       console.error("清理错误任务失败", error);
+      const msg = error.response?.data?.detail || error.message || '未知错误';
+      alert(`清除失败：${msg}`);
     }
   };
 

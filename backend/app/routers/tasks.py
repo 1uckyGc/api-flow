@@ -12,6 +12,22 @@ from app.schemas.task import TaskGroupCreate, TaskGroupResponse, TaskGroupListRe
 from app.routers.auth import get_current_user
 from app.workers.tasks import process_generation, update_group_status, notify_ws
 from app.utils.file_cleanup import remove_task_output, remove_tasks_outputs
+from app.models.api_call_log import ApiCallLog
+
+
+def _unbind_api_call_logs(db: Session, task_ids=None, group_ids=None) -> None:
+    """删除 Task/Group 之前，把 ApiCallLog 上的 FK 置 NULL 避免外键违例。
+    审计行保留不删，跟 cleanup_tasks.purge_old_artifacts 同范式。
+    """
+    if task_ids:
+        db.query(ApiCallLog).filter(ApiCallLog.task_id.in_(task_ids)).update(
+            {"task_id": None}, synchronize_session=False
+        )
+    if group_ids:
+        db.query(ApiCallLog).filter(ApiCallLog.group_id.in_(group_ids)).update(
+            {"group_id": None}, synchronize_session=False
+        )
+    db.flush()
 
 import logging
 logger = logging.getLogger(__name__)
@@ -53,10 +69,13 @@ async def create_task_group(
     db.refresh(db_group)
 
     # ==========================================
-    # 核心拦截路口：裂变模式的源头（从全局模糊词 -> N条强表现图生图任务）
+    # 核心拦截路口：裂变模式的源头
+    # - TEXT_TO_IMAGE：老形态（产品图 → LLM 扩 N → i2i 出 N 张图）保留以兼容已存在的 group
+    # - IMAGE_TO_VIDEO：新形态（产品图 → Doubao 洗稿 N → i2v 直接出 N 个视频）
     # ==========================================
-    if task_group_in.source == TaskSource.FISSION and task_group_in.task_type == TaskType.TEXT_TO_IMAGE:
-        # 裂变第一阶段：改异步处理，立即返回 ID
+    if task_group_in.source == TaskSource.FISSION and task_group_in.task_type in (
+        TaskType.TEXT_TO_IMAGE, TaskType.IMAGE_TO_VIDEO
+    ):
         background_tasks.add_task(
             expand_fission_task_group,
             db_group.id,
@@ -84,10 +103,17 @@ async def create_task_group(
             db.add(db_task)
         
         db.commit()
-        
-        for db_task in db_tasks:
-            process_generation.delay(db_task.id)
-            
+
+        # Dreamina Seedance 必须串行执行（单账户并行会撞并发上限）
+        # 检测 group 级 model；命中则全组走专属 batch task，单条投递一次
+        group_model = (db_group.config_json or {}).get("model", "") if db_group.config_json else ""
+        if group_model.startswith("dreamina/seedance"):
+            from app.workers.dreamina_batch import run_dreamina_serial_batch
+            run_dreamina_serial_batch.delay(db_group.id)
+        else:
+            for db_task in db_tasks:
+                process_generation.delay(db_task.id)
+
         db.commit()
         db.refresh(db_group)
         return db_group
@@ -140,18 +166,24 @@ async def expand_fission_task_group(group_id: str, task_group_in: TaskGroupCreat
         db_group.config_json = new_config
         db.commit()
 
-        # 2. 组装最终任务
+        # 2. 组装最终任务 —— 按 task_type 分支
+        is_video_first = task_group_in.task_type == TaskType.IMAGE_TO_VIDEO
         from app.prompts import IMAGE_PROMPT_FINAL_TEMPLATE, IMAGE_PROMPT_BASE_INSTRUCTION, DEFAULT_SYSTEM_CONSTRAINT
-        
+
         db_tasks = []
         for c_prompt in creative_prompts:
-            final_prompt = IMAGE_PROMPT_FINAL_TEMPLATE.format(
-                base_instructions=IMAGE_PROMPT_BASE_INSTRUCTION,
-                system_constraint=DEFAULT_SYSTEM_CONSTRAINT,
-                global_prompt=task_group_in.global_prompt or "",
-                prompt_text=c_prompt
-            )
-            
+            if is_video_first:
+                # 新形态：Doubao 出来的 prompt 直接当 i2v prompt，全部任务共享同一张产品图
+                final_prompt = c_prompt
+            else:
+                # 老形态：i2i 用 IMAGE_PROMPT_FINAL_TEMPLATE 包裹（产品底线/融合要求/画质要求）
+                final_prompt = IMAGE_PROMPT_FINAL_TEMPLATE.format(
+                    base_instructions=IMAGE_PROMPT_BASE_INSTRUCTION,
+                    system_constraint=DEFAULT_SYSTEM_CONSTRAINT,
+                    global_prompt=task_group_in.global_prompt or "",
+                    prompt_text=c_prompt
+                )
+
             db_task = Task(
                 id=str(uuid.uuid4()),
                 group_id=db_group.id,
@@ -168,10 +200,15 @@ async def expand_fission_task_group(group_id: str, task_group_in: TaskGroupCreat
         db_group.status = GroupStatus.PROCESSING
         db.commit()
 
-        # 3. 发送给 Celery
-        for t in db_tasks:
-            process_generation.delay(t.id)
-            
+        # 3. 发送给 Celery —— Dreamina Seedance 走串行 batch；其他并行
+        group_model = (db_group.config_json or {}).get("model", "")
+        if group_model.startswith("dreamina/seedance"):
+            from app.workers.dreamina_batch import run_dreamina_serial_batch
+            run_dreamina_serial_batch.delay(db_group.id)
+        else:
+            for t in db_tasks:
+                process_generation.delay(t.id)
+
         db.commit()
         # 通知前端内容已从 PENDING 切换到具体任务流
         await notify_ws(user_id, {"type": "TASK_UPDATE"})
@@ -266,6 +303,8 @@ def delete_task_group(
         raise HTTPException(status_code=404, detail="Task Group not found")
 
     remove_tasks_outputs(group.tasks)
+    task_ids = [t.id for t in group.tasks]
+    _unbind_api_call_logs(db, task_ids=task_ids, group_ids=[group_id])
     db.delete(group)
     db.commit()
 
@@ -296,6 +335,7 @@ def clear_failed_tasks(
     to_delete = failed_tasks + zombie_tasks
     count = len(to_delete)
     remove_tasks_outputs(to_delete)
+    _unbind_api_call_logs(db, task_ids=[t.id for t in to_delete])
     for task in to_delete:
         db.delete(task)
 
@@ -306,6 +346,8 @@ def clear_failed_tasks(
         TaskGroup.user_id == current_user.id,
         ~TaskGroup.tasks.any()
     ).all()
+    empty_group_ids = [g.id for g in empty_groups]
+    _unbind_api_call_logs(db, group_ids=empty_group_ids)
     for g in empty_groups:
         db.delete(g)
 
@@ -328,16 +370,19 @@ async def delete_single_task(
         raise HTTPException(status_code=404, detail="Task not found")
     
     remove_task_output(task.output_file)
-            
+    remove_task_output(task.output_thumbnail)
+
     group_id = task.group_id
+    _unbind_api_call_logs(db, task_ids=[task_id])
     db.delete(task)
     db.commit()
-    
+
     # 检查并清理空组
     remaining = db.query(Task).filter(Task.group_id == group_id).count()
     if remaining == 0:
         group = db.query(TaskGroup).filter(TaskGroup.id == group_id).first()
         if group:
+            _unbind_api_call_logs(db, group_ids=[group_id])
             db.delete(group)
             db.commit()
     else:
@@ -392,22 +437,26 @@ def batch_delete_tasks(
     tasks = db.query(Task).filter(Task.id.in_(task_ids), Task.user_id == current_user.id).all()
     group_ids = set()
     remove_tasks_outputs(tasks)
+    _unbind_api_call_logs(db, task_ids=[t.id for t in tasks])
     count = 0
     for task in tasks:
         group_ids.add(task.group_id)
         db.delete(task)
         count += 1
-    
+
     db.commit()
-    
-    # 清理变空的组
+
+    # 清理变空的组（顺手把 ApiCallLog.group_id 也解绑）
+    emptied = []
     for g_id in group_ids:
         remaining = db.query(Task).filter(Task.group_id == g_id).count()
         if remaining == 0:
             group = db.query(TaskGroup).filter(TaskGroup.id == g_id).first()
             if group:
+                emptied.append(g_id)
                 db.delete(group)
-    
+    if emptied:
+        _unbind_api_call_logs(db, group_ids=emptied)
     db.commit()
     return {"message": f"Successfully deleted {count} tasks"}
 

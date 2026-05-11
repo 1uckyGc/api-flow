@@ -25,8 +25,8 @@ const VIDEO_MODEL_GROUPS = [
   {
     label: '第三方 · cc123.ai relay',
     options: [
-      { value: 'cc123/sd-2', label: 'cc123 · sd-2 (Seedance 2.0 标准)', vip: false },
-      { value: 'cc123/sd-2-vip', label: 'cc123 · sd-2-vip (Seedance 2.0 · 队列优先)', vip: true },
+      { value: 'cc123/sd-2', label: 'cc123 · sd-2 (Seedance 2.0 · 15s 标准)', vip: false },
+      { value: 'cc123/sd-2-vip', label: 'cc123 · sd-2-vip (Seedance 2.0 · 15s · 队列优先)', vip: true },
       { value: 'cc123/sora-2', label: 'cc123 · sora-2 (OpenAI Sora 2)', vip: false },
     ],
   },
@@ -48,7 +48,7 @@ function formatTaskError(rawMsg) {
     return {
       title: 'cc123 账户余额不足',
       detail: `本次估算需 $${need.toFixed(2)}，当前余额 $${have.toFixed(2)}（差 $${(need - have).toFixed(2)}）`,
-      hint: '请去 cc123.ai 充值，或换更便宜的组合（sd-2 + portrait + 720p + 5s ≈ $1.4）',
+      hint: '请去 cc123.ai 充值，或缩短时长（sd-2 portrait large 计费 $0.57/s：5s ≈ $2.85 / 8s ≈ $4.56 / 15s ≈ $8.55）',
     };
   }
 

@@ -477,8 +477,8 @@ export default function ToolPanel() {
                       </>
                     )}
                     <option disabled>──── 第三方 · cc123.ai (Seedance / Sora) ────</option>
-                    <option value="cc123/sd-2">cc123 · sd-2 (Seedance 2.0)</option>
-                    <option value="cc123/sd-2-vip">cc123 · sd-2-vip (Seedance 2.0 · 队列优先)</option>
+                    <option value="cc123/sd-2">cc123 · sd-2 (Seedance 2.0 · 15s)</option>
+                    <option value="cc123/sd-2-vip">cc123 · sd-2-vip (Seedance 2.0 · 15s · 队列优先)</option>
                     <option value="cc123/sora-2">cc123 · sora-2 (OpenAI Sora 2)</option>
                     <option disabled>──── Grok ────</option>
                     <option value={kind === 'i2v' ? 'grok-imagine-video-i2v' : 'grok-imagine-video-t2v'}>

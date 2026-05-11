@@ -24,7 +24,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from app.utils.logger import logger
 
@@ -256,6 +256,7 @@ class DreaminaClient:
         download_dir: Optional[str] = None,
         max_wait_sec: int = 1800,    # 20 min — seedance2.0fast 高峰时排队 5-15 min 是常态
         poll_interval: int = 15,     # 队列长就别太勤快，省得撞速率限制
+        progress_callback: Optional[Callable[[dict], None]] = None,
     ) -> DreaminaResult:
         """submit + 自动轮询 + 自动下载到本地 mp4。"""
         if not os.path.exists(self.bin):
@@ -295,6 +296,24 @@ class DreaminaClient:
                 raw_stdout_tail=tail,
             )
 
+        # 提交成功立即推一次进度（不等 60s）
+        def _safe_cb(info: dict) -> None:
+            if not progress_callback:
+                return
+            try:
+                progress_callback(info)
+            except Exception as e:
+                logger.warning(f"dreamina progress_callback raised: {e}")
+
+        start_ts = time.monotonic()
+        _safe_cb({
+            "gen_status": "submitted",
+            "queue_idx": None,
+            "fail_reason": None,
+            "elapsed_sec": 0,
+            "submit_id": sid,
+        })
+
         # 2) 轮询
         ddir = Path(download_dir) if download_dir else Path("outputs") / "dreamina"
         ddir.mkdir(parents=True, exist_ok=True)
@@ -303,6 +322,8 @@ class DreaminaClient:
         polls = 0
         last_out = out
         last_queue_idx = None
+        last_cb_ts = time.monotonic()
+        CB_INTERVAL = 60.0  # 每 60s 节流一次回调
         while time.monotonic() < deadline:
             polls += 1
             time.sleep(poll_interval)
@@ -313,11 +334,20 @@ class DreaminaClient:
             last_out = out2
             gs = _extract_gen_status(out2)
             qm = QUEUE_IDX_PATTERN.search(out2)
-            if qm:
-                qi = int(qm.group(1))
-                if last_queue_idx != qi:
-                    logger.info(f"dreamina poll #{polls} sid={sid[:8]} status={gs} queue_idx={qi}")
-                    last_queue_idx = qi
+            qi = int(qm.group(1)) if qm else None
+            if qi is not None and last_queue_idx != qi:
+                logger.info(f"dreamina poll #{polls} sid={sid[:8]} status={gs} queue_idx={qi}")
+                last_queue_idx = qi
+            now = time.monotonic()
+            if progress_callback and (now - last_cb_ts) >= CB_INTERVAL:
+                _safe_cb({
+                    "gen_status": gs,
+                    "queue_idx": qi if qi is not None else last_queue_idx,
+                    "fail_reason": _extract_fail_reason(out2),
+                    "elapsed_sec": int(now - start_ts),
+                    "submit_id": sid,
+                })
+                last_cb_ts = now
             if gs == "success":
                 # 3) 触发下载
                 rc3, out3, _ = _run([

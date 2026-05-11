@@ -135,13 +135,60 @@ export default function DetailPanel({ activeJobId }) {
     );
   }
 
-  const imageGroups = chainGroups.filter(g => !g.fission_parent_id || g.fission_stage === 'images');
-  const videoGroups = chainGroups.filter(g => g.fission_stage === 'videos');
+  // 新形态：source=FISSION + task_type=image_to_video → rootGroup 本身就是视频组，
+  // 不存在阶段 1 图像层。老形态：rootGroup 是图像组，有 fission_stage='videos' 子组。
+  const isVideoFirstFission = rootGroup.task_type === 'image_to_video' && rootGroup.source === 'FISSION';
+
+  const imageGroups = isVideoFirstFission
+    ? []
+    : chainGroups.filter(g => !g.fission_parent_id || g.fission_stage === 'images');
+  const videoGroups = isVideoFirstFission
+    ? [rootGroup]
+    : chainGroups.filter(g => g.fission_stage === 'videos');
   const extendGroups = chainGroups.filter(g => g.fission_stage === 'extended' || g.config_json?.isExtension);
 
   const images = imageGroups.flatMap(g => g.tasks || []);
   const videos = videoGroups.flatMap(g => g.tasks || []);
   const extends_ = extendGroups.flatMap(g => g.tasks || []);
+
+  // 自动下载：CreateFissionModal 开关持久化到 localStorage.fission_auto_download。
+  // 监听本 group 下所有 success 视频，新增的触发浏览器原生下载到默认下载夹。
+  // localStorage.fission_downloaded 记录已下载过的 task.id 集合，避免页面刷新重复触发。
+  useEffect(() => {
+    if (localStorage.getItem('fission_auto_download') !== 'true') return;
+    let dl;
+    try { dl = new Set(JSON.parse(localStorage.getItem('fission_downloaded') || '[]')); }
+    catch { dl = new Set(); }
+    const fresh = [...videos, ...extends_].filter(
+      t => t && t.id && t.status === 'success' && t.output_file && !dl.has(t.id)
+    );
+    if (fresh.length === 0) return;
+    fresh.forEach(t => {
+      const a = document.createElement('a');
+      a.href = `/${t.output_file}`;
+      a.download = t.output_file.split('/').pop() || `fission-${t.id.slice(0,8)}.mp4`;
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      dl.add(t.id);
+    });
+    // 集合 cap 1000 条避免无限增长
+    const arr = [...dl];
+    if (arr.length > 1000) arr.splice(0, arr.length - 1000);
+    localStorage.setItem('fission_downloaded', JSON.stringify(arr));
+  }, [videos, extends_]);
+
+  // Seedance 串行批处理的实时日志：找到正在跑的 dreamina/seedance 视频 group，
+  // 优先取 taskProgressMap 推送的最新一条，回退 progress_message
+  const activeSeedanceGroup = [...videoGroups, ...extendGroups].find(g => {
+    const m = (g.config_json && g.config_json.model) || '';
+    if (!m.startsWith('dreamina/seedance')) return false;
+    return (g.tasks || []).some(t => t.status === 'running' || t.status === 'queued');
+  });
+  const seedanceLogLine = activeSeedanceGroup
+    ? (taskProgressMap[`group_${activeSeedanceGroup.id}`] || activeSeedanceGroup.progress_message)
+    : null;
 
   const toggleSelection = (setFn, id, e) => {
     e.stopPropagation();
@@ -406,7 +453,8 @@ export default function DetailPanel({ activeJobId }) {
           </p>
         </div>
 
-        {/* 图像层 */}
+        {/* 图像层 —— 仅老形态 (text_to_image) 显示；新形态直接出视频，没有图像阶段 */}
+        {!isVideoFirstFission && (
         <div className="bg-[var(--surface-2)] rounded-2xl p-5 border border-[var(--border-subtle)] shadow-xl relative">
           <div className="absolute left-0 top-0 bottom-0 w-1 bg-fuchsia-500 rounded-l-2xl"></div>
           <div className="flex justify-between items-center mb-4">
@@ -470,6 +518,18 @@ export default function DetailPanel({ activeJobId }) {
             </div>
           )}
         </div>
+        )}
+
+        {/* Seedance 串行批处理实时日志（仅当 dreamina/seedance batch 进行中时显示） */}
+        {seedanceLogLine && (
+          <div className="bg-[var(--surface-2)] rounded-2xl px-4 py-3 border border-[var(--border-subtle)] shadow flex items-start gap-3">
+            <Clock size={14} className="animate-[spin_3s_linear_infinite] text-cyan-400 mt-0.5 flex-shrink-0" />
+            <div className="flex-1 min-w-0">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-cyan-400 mb-1">Seedance 实时日志（每分钟刷新）</div>
+              <div className="text-[11px] text-[var(--text-secondary)] leading-relaxed break-words">{seedanceLogLine}</div>
+            </div>
+          </div>
+        )}
 
         {/* 视频层 */}
         {videos.length > 0 && (

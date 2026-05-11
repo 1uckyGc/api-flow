@@ -289,6 +289,28 @@ async def _probe_dreamina() -> dict:
         d = json.loads(m.group(0))
     except Exception:
         return {"provider": provider, "label": label, "online": False, "error": f"JSON 解析失败: {out[:200]}"}
+    # Dreamina CLI 没暴露账户级并发上限，统计本系统当前占用的并发槽
+    # （DB 中 status=running 且模型属于 dreamina/seedance2.0 系列）
+    running_local = None
+    try:
+        from app.database import SessionLocal
+        from app.models.task import Task, TaskGroup, TaskStatus
+        with SessionLocal() as _db:
+            running_tasks = _db.query(Task, TaskGroup).join(
+                TaskGroup, Task.group_id == TaskGroup.id
+            ).filter(Task.status == TaskStatus.RUNNING).all()
+            n = 0
+            for t, g in running_tasks:
+                cfg_t = t.config_json or {}
+                cfg_g = g.config_json or {}
+                m = cfg_t.get("model") or cfg_g.get("model") or ""
+                mv = cfg_t.get("model_version") or cfg_g.get("model_version") or ""
+                if m.startswith("dreamina/") or mv.startswith("dreamina/") or mv.startswith("seedance2.0"):
+                    n += 1
+            running_local = n
+    except Exception as e:
+        logger.warning(f"_probe_dreamina running count failed: {e}")
+
     return {
         "provider": provider,
         "label": label,
@@ -298,6 +320,7 @@ async def _probe_dreamina() -> dict:
             "user_id": d.get("user_id"),
             "user_name": d.get("user_name") or "（未设置）",
             "vip_level": d.get("vip_level"),
+            "running_local": running_local,
         },
     }
 

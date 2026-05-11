@@ -279,7 +279,12 @@ def run_video_via_cc123(self, task_id: str) -> dict:
 
         aspect = cfg.get("aspect_ratio") or "9:16"
         orientation = _aspect_to_orientation(aspect)
-        duration = int(cfg.get("duration", 5))
+        duration = int(cfg.get("duration", 15))
+        # cc123 sd-2 / sd-2-vip 当前固定 15s
+        if cc123_model.startswith("sd-2"):
+            if duration != 15:
+                logger.info(f"cc123 {cc123_model}: forcing duration {duration}s → 15s (locked)")
+            duration = 15
         size = cfg.get("size") or "large"
         watermark = bool(cfg.get("watermark", False))
 
@@ -303,6 +308,17 @@ def run_video_via_cc123(self, task_id: str) -> dict:
             return _fail_task(db, task, (result.error or "cc123 调用失败")[:500])
 
         task.output_file = result.local_video_path
+        # 提取首帧作为视频封面
+        try:
+            from app.workers.tasks import extract_video_poster
+            poster_path = extract_video_poster(result.local_video_path)
+            if poster_path:
+                if poster_path.startswith("outputs/"):
+                    task.output_thumbnail = poster_path
+                else:
+                    task.output_thumbnail = os.path.join("outputs", os.path.basename(poster_path)).replace("\\", "/")
+        except Exception as pe:
+            logger.warning(f"cc123 poster extract failed for task {task_id}: {pe}")
         task.status = TaskStatus.SUCCESS
         cfg.update({
             "cc123_task_id": result.task_id,

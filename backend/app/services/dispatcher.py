@@ -219,7 +219,12 @@ async def _run_cc123(
 
     aspect = config_json.get("aspect_ratio") or "9:16"
     orientation = _aspect_to_orientation(aspect)
-    duration = int(config_json.get("seconds") or config_json.get("duration") or 5)
+    duration = int(config_json.get("seconds") or config_json.get("duration") or 15)
+    # cc123 sd-2 / sd-2-vip 当前固定 15s（其他时长上游开通后再放开）
+    if cc123_model.startswith("sd-2"):
+        if duration != 15:
+            logger.info(f"cc123 {cc123_model}: forcing duration {duration}s → 15s (locked)")
+        duration = 15
     size = config_json.get("size") or "large"
     watermark = bool(config_json.get("watermark", False))
 

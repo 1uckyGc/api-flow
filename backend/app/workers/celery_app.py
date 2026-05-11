@@ -17,6 +17,7 @@ celery_app = Celery(
         "app.workers.workflow_worker",
         "app.workers.cleanup_tasks",
         "app.workers.replicate_tasks",
+        "app.workers.dreamina_batch",
     ],
 )
 

@@ -54,6 +54,9 @@ backend/                    FastAPI 应用 + Celery worker
                               03:30 purge_old_logs (30 天 ApiCallLog 行)
                               04:00 purge_old_artifacts (3 天 task_groups + 文件 + 前端记录 + replicate workdir rmtree)
                               hourly :15 mark_zombie_running_failed (running/queued >2h 自动打 failed，刷新所属 group)
+      dreamina_batch.py     run_dreamina_serial_batch — 裂变阶段 2 / 工具箱 dreamina/seedance 任务的串行批处理
+                              （单账户并发上限，必须排队跑）；progress_callback 60s 节流推 WS
+      _ws_sync.py           notify_ws_sync — sync Celery 调用内部 WS notify 端点的 httpx.Client 封装
       celery_app.py         Celery 工厂 + beat schedule
     prompts.py              提示词模板中心（LLM + 图像）
     utils/                  scheduler（限流）/ file_cleanup / logger
@@ -65,6 +68,8 @@ frontend/                   Vite + React 单页应用
     App.jsx                 路由表；除 /login 外全部 token 鉴权
     api/                    axios 实例 + 各业务 endpoint 客户端（client.js / logs.js / ...）
     pages/                  顶层工作区 — fission / director / workshop / FissionWorkspace / Logs / replicate（复刻视频）
+    pages/fission/          FissionWorkspace（左 Sidebar + 右 DetailPanel） / CreateFissionModal（含自动下载 toggle）
+                            / FissionDetailsModal（STEP 01 原始 / STEP 02 Doubao 洗稿双栏 diff / STEP 03 最终 prompt）/ DetailPanel（含 Seedance 实时日志条 + 自动下载 useEffect）
     pages/replicate/        ReplicatePage（壳）/ InputForm / AwaitingLLMOutput / GUList（双产线卡片+JSON 复制按钮）
     components/             Layout / Inbox / Gallery / Settings / Studio / TaskCreate / Toolbox / Utility
     constants/models.js     前端模型注册表（与后端 model_registry.py 对齐 + providerOf() 前缀检测）
@@ -82,7 +87,7 @@ docker-compose.yml          5 服务编排：worker 命令 `--beat --pool=thread
 
 | 模式 | 路由 | 用途 |
 |---|---|---|
-| **裂变（Fission）** | `/fission` | 一图一句话 → DeepSeek 扩写 N 条 → 并行渲染 → 可选批量出视频 |
+| **裂变（Fission）** | `/fission` | **新形态（video-first）**：上传产品图 + 完整提示词模板 + 视频引擎 → LLM (DeepSeek/Doubao) **洗稿** N 条变体（保留模板核心结构，只随机替换可变要素）→ 直接 i2v 出 N 个视频；老形态 (text_to_image 起点) 数据仍兼容显示 |
 | **导演模式（Director）** | `/director` | 剧本 → DeepSeek 拆 N 个分镜 → 锚点帧 → 并行剩余帧 → 可选批量出视频 |
 | **创意工坊（Workshop）** | `/workshop`、`/workshop/build`、`/workshop/run` | 用户自建多步工作流（模板 + 运行实例） |
 | **工具箱（Toolbox）** | `/t2i`、`/i2i`、`/t2v`、`/i2v` | 一次性的 文生图 / 图生图 / 文生视频 / 图生视频；下拉按 HOLO / Flow2API / Dreamina（即梦）/ cc123 / Grok 多组分隔。所有模型走 `dispatcher.dispatch_generate` 统一路由 |
@@ -262,6 +267,35 @@ alembic upgrade head
   - 服务器稳态磁盘 ≈ 3 天产出量（~5GB），永不爆。前端任务列表 3 天后自动消失（DB 行被删）。
   - 手动触发：`docker exec followmeeeaigc_worker python -c "from app.workers.cleanup_tasks import purge_old_artifacts; print(purge_old_artifacts())"`
 - **Toolbox 下拉的真正实现是 `Utility/ToolPanel.jsx`**（不是 `Toolbox/Toolbox.jsx`）。`/t2i /i2i /t2v /i2v` 全部走 ToolPanel 的硬编码 option 列表 + 多 provider optgroup 分组渲染（HOLO / HOLO·Sora 2 / Flow2API / Dreamina（即梦）/ cc123 / Grok）。改下拉**只改 ToolPanel.jsx**。
+- **裂变 video-first 流（2026-05-11 重构）**。CreateFissionModal 提交的是 `task_type=image_to_video + source=FISSION + model=dreamina/seedance2.0fast` 等视频引擎 —— **跳过老的 stage-1 i2i**。router 拦截 `source==FISSION && task_type in (TEXT_TO_IMAGE, IMAGE_TO_VIDEO)` 两种走 `expand_fission_task_group`：
+  - `is_video_first` 分支：Doubao 洗稿出的 prompt **不包 IMAGE_PROMPT_FINAL_TEMPLATE**，直接当 i2v prompt；N 个 task 都用同一张产品图为 input_files
+  - 老 text_to_image 路径仍保留兼容（DB 里旧 group 仍能 i2i 跑通）
+  - 后续派发：`model.startswith("dreamina/seedance")` → 投 `run_dreamina_serial_batch` 单 Celery 任务串行跑（不批量 delay）；否则并行 `process_generation.delay`
+  - `LLM_SYSTEM_PROMPT`（`prompts.py`）已重写为**洗稿编辑**人设：保留模板核心结构（产品名/视觉风格/相机参数），只自动识别可变要素（具体时间/色温/光线方向/场景小物等）做随机替换，输出 N 条相似但变量不同的提示词；**禁止主动添加模板没有的场景/光线/景别**。FissionDetailsModal STEP 02 用 `diff` npm 包 + `diffWords` 渲染**双栏 PR-style 差异**（左 STEP01 原始红色删除线，右 STEP02 改后绿色高亮），让用户一眼看到 Doubao 改了哪些可变要素
+  - DetailPanel 用 `isVideoFirstFission = rootGroup.task_type === 'image_to_video' && source === 'FISSION'` 检测；新形态**隐藏 stage-1 图像层**，把 rootGroup 直接当 videos 容器渲染；老形态保持 3 段（image / video / extend）
+  - CreateFissionModal 顶部加 **"视频完成后自动下载到默认下载夹"checkbox**（持久化 `localStorage.fission_auto_download`）；DetailPanel useEffect 监听 success 视频，用 `<a download>` 触发浏览器原生下载（**裸 HTTP 也支持**，不需要 secure context）；`localStorage.fission_downloaded` 集合（cap 1000）防刷新重复触发
+- **Dreamina Seedance 串行 batch**（`workers/dreamina_batch.py`）。OAuth 单账户并行多任务会撞并发上限 + 失败一条整批前功尽弃，所以 router 检测到 group `model.startswith("dreamina/seedance")` 单次投 `run_dreamina_serial_batch.delay(group_id)`，内部 for-loop 逐条调 `dreamina_client.image2video`：
+  - 每 60s 通过 `progress_callback` 节流回传 `{queue_idx, gen_status, fail_reason, elapsed_sec}`；batch 把它翻译成进度文本写到 `task.progress_message` + `group.progress_message` + WS push（`TASK_PROGRESS` / `GROUP_PROGRESS`）
+  - phase 判定**优先看 queue_idx**（实测 dreamina query_result 返 `gen_status="querying" + queue_info.queue_idx=2150`，要把 2150 这个排队位置秀出来；旧逻辑只在 `gen_status=="queuing"` 才显示位置，导致 querying 状态丢掉真实位置）
+  - 完成后调 `extract_video_poster()` 写 `task.output_thumbnail`（**绕过 process_generation 主流程，必须手动调一次**，否则缩略图 NULL → 前端 `<video poster>` 回退 `#t=0.001` 不一定 work → 白底）
+  - 失败时 `result.fail_reason` 直接落到 `task.error_message`，前端 GUList `formatTaskError` 识别"dreamina 未登录"等典型错误
+- **同步 WS 推送 helper**（`workers/_ws_sync.py::notify_ws_sync`）。sync Celery 任务（dreamina_batch）无法用 async `notify_ws`，封一个 `httpx.Client` 同步版调 `/ws/internal/notify` 端点。**不要在 sync 上下文调原 async notify_ws**，会炸。
+- **删除 Task 必须先解绑 ApiCallLog FK**。`ApiCallLog.task_id` / `group_id` 都是 `ForeignKey(... nullable=True)` 但**没设 `ondelete='SET NULL'`**（默认 RESTRICT）。直接 `db.delete(task)` 会 `psycopg2.errors.ForeignKeyViolation`。修：`routers/tasks.py::_unbind_api_call_logs(db, task_ids, group_ids)` 在 4 个删除端点（`delete_task_group` / `clear_failed_tasks` / `delete_single_task` / `batch_delete_tasks`）的 `db.delete` **之前**先 UPDATE SET NULL；cleanup_tasks 早就用了同款 pattern，router 之前漏。
+- **`/api/logs/providers` Dreamina metrics 加 running_local**。dreamina CLI 不暴露账户级并发上限，但能算"本系统正在占用多少 dreamina 槽"——查 DB `Task.status=RUNNING` 且 model/model_version 属于 dreamina/seedance 的任务数。admin 看 /logs 顶部 Dreamina 卡片可见。
+- **LLM provider 切换 helper**（`services/ai_service.py`）。三个 helper：
+  - `_llm_endpoint() -> (url, key, model)`：按 `settings.LLM_PROVIDER`（deepseek/doubao）选；doubao key 空时自动回落 deepseek
+  - `_llm_supports_json_format(model)`：Doubao 系列 + deepseek-reasoner 不支持 `response_format: json_object`，payload 构造前判断
+  - `_extract_json_text(content)`：剥 LLM 输出周围的 markdown ```json``` 围栏
+  - **三处复用**：`generate_fission_prompts` / `generate_director_scene_prompts` / `workflow_worker.call_workflow_llm`，加新 provider 只改 `_llm_endpoint`
+  - `vision_keywords` 含 `doubao` → Doubao-Seed-2.0-lite 是 VLM 自动启用多模态 image_url + base64 协议
+- **HOLO Sora-2 必传 size 字段**。`Sora-2-12` / `Sora-2-16`（严格大小写）submit payload 必须显式带 `size: "1280x720"` 或 `"720x1280"`，否则上游 400。`_generate_holo` 检测 `model.lower().startswith("sora-")` 时自动注入：i2v 场景用 PIL 读 image_paths[0] 宽高决定横/竖；纯 t2v 回落 720x1280 竖屏。其他比例（9:14 等）不支持。
+- **cc123 sd-2 系列固定 15s**。`dispatcher._run_cc123` + `replicate_tasks.run_video_via_cc123` 都检测 `cc123_model.startswith("sd-2")` 强制 duration=15（其他时长 cc123 上游未开通通道，会报 model_not_found）。前端下拉文案对应改 `(Seedance 2.0 · 15s 标准)`。
+- **僵尸任务每小时自动清 + 按钮也清**。worker 崩溃/重启/网络断会留下 `status=running` 或 `queued` 永远不更新的"卡住"任务（UI 一直显示"生成中..."）。两层兜底：
+  - `cleanup_tasks.py::mark_zombie_running_failed` celery beat 每小时 `:15` 跑：`status in (running, queued) AND updated_at < now-2h` → 全部打 `failed` + `error_message` + `update_group_status` 刷新组状态
+  - `DELETE /api/tasks/failed/clear/all` 用户按钮**同时清 failed + 僵尸**（>2h running/queued），返回 `{failed: N, zombies: M, message}`；前端 EndlessGallery alert 弹具体数字反馈
+- **EndlessGallery 多选浮条删除按钮**（`L1110`）已存在但不显眼。多选模式激活 + `selectedTasks.size > 0` 时底部浮动操作栏右侧出 `<Trash2/> 删除` 红按钮（handleBatchDelete 调 `POST /api/tasks/batch-delete`）。alert 反馈成功/失败具体错误（不再只 console.error）。
+- **Caddy :80 反代 → frontend :8090**（2026-05-11 起）。`/etc/caddy/Caddyfile` 配 `:80 { reverse_proxy localhost:8090 { header_up ... } }`，让 `http://154.51.41.140/`（裸 IP，无端口）直接进入 frontend。WebSocket 升级 Caddy v2 reverse_proxy 自动处理。**两路径都可用**：`http://154.51.41.140/`（经 Caddy 反代）和 `http://154.51.41.140:8090/`（端口直连）。Caddyfile 备份 `Caddyfile.bak.20260511`。后续接域名 + HTTPS 只需把 Caddyfile 顶部 `:80` 改成 `your-domain.com`，Caddy 自动 Let's Encrypt。
+- **python `"..."` 字符串内嵌引号必须转义或换字符**。`prompts.py` 改 LLM_SYSTEM_PROMPT 时直接写 `"傍晚硬光"`（中文上下文里 ASCII 双引号）→ Python 解析器把字符串截断 → SyntaxError → uvicorn 启动失败但容器仍 Up。**症状**：所有 /api 请求 502，frontend 静态资源 200。后端 docker logs 才能看到 stack trace。**对策**：嵌套引号用 `『日式书名号』`，或单引号外壳 `'...'`，或 `\"...\"` 转义。
 - **Windows + Docker Desktop rebuild 前端时的两个坑**：
   - rebuild 后只 recreate frontend 才能生效：`docker compose up -d --force-recreate --no-deps frontend`
   - BuildKit 多阶段缓存有时复用旧 dist。改源码 vite hash 不变 = build context 没拿到新文件，先 `docker buildx prune -af` 或临时 `DOCKER_BUILDKIT=0 docker compose build --no-cache frontend` 用经典 builder

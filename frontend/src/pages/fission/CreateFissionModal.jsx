@@ -10,18 +10,20 @@ export default function CreateFissionModal({ onClose, onSuccess, initialData = n
   const [file, setFile] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [taskTitle, setTaskTitle] = useState('');
-  const [videoModel, setVideoModel] = useState(getDefaultModel(provider, 'fission_video'));
+  const [videoModel, setVideoModel] = useState('dreamina/seedance2.0fast');
   const [globalPrompt, setGlobalPrompt] = useState('');
   const [fissionCount, setFissionCount] = useState(4);
   const [aspectRatio, setAspectRatio] = useState('9:16');
-  const [resolution, setResolution] = useState('standard');
+  const [autoDownload, setAutoDownload] = useState(() => localStorage.getItem('fission_auto_download') === 'true');
 
   useEffect(() => {
     if (initialData) {
       setTaskTitle(initialData.title || '');
       setGlobalPrompt(initialData.global_prompt || '');
       if (initialData.config_json) {
-        setVideoModel(initialData.config_json.videoModel || getDefaultModel(provider, 'fission_video'));
+        // 新形态：model 就是视频模型；老形态：model 是图像模型 + videoModel 是视频模型
+        const initialModel = initialData.config_json.videoModel || initialData.config_json.model || 'dreamina/seedance2.0fast';
+        setVideoModel(initialModel);
         setFissionCount(initialData.config_json.count || 4);
         setAspectRatio(initialData.config_json.aspectRatio || '9:16');
       }
@@ -59,27 +61,22 @@ export default function CreateFissionModal({ onClose, onSuccess, initialData = n
 
       if (!uploadedImagePath) return alert("请上传或选择参考图");
 
-      let finalImageModel = "gemini-3.0-pro-image-portrait";
-      if (aspectRatio === '16:9') finalImageModel = "gemini-3.0-pro-image-landscape";
-      if (aspectRatio === '1:1') finalImageModel = "gemini-3.0-pro-image-square";
-
-      if (resolution === '2k') finalImageModel += '-2k';
-      if (resolution === '4k') finalImageModel += '-4k';
-
-      // 解析 Lite 模型 alias 为完整名
+      // 解析视频模型 alias（仅 veo_i2v_lite 需要拼方向）
       const ratioSuffix = aspectRatio === '16:9' ? 'landscape' : 'portrait';
       let finalVideoModel = videoModel;
       if (videoModel === 'veo_i2v_lite') {
         finalVideoModel = `veo_3_1_i2v_lite_${ratioSuffix}`;
       }
 
+      // 新形态：上来就是 image_to_video。后端 Doubao 洗稿出 N 条视频 prompt，
+      // 每条对应一个 i2v 子任务，全部以同一产品图为输入。
       const taskGroupData = {
-        title: taskTitle.trim() || (globalPrompt.substring(0, 15) + `... (${fissionCount}变体)`),
-        task_type: "text_to_image",
+        title: taskTitle.trim() || (globalPrompt.substring(0, 15) + `... (${fissionCount}变体视频)`),
+        task_type: "image_to_video",
         source: "FISSION",
         global_prompt: globalPrompt.trim(),
-        config_json: { model: finalImageModel, videoModel: finalVideoModel, aspectRatio, count: fissionCount },
-        tasks: [{ prompt: "", input_files: [uploadedImagePath] }] 
+        config_json: { model: finalVideoModel, aspectRatio, count: fissionCount },
+        tasks: [{ prompt: "", input_files: [uploadedImagePath] }]
       };
       
       const resTask = await api.post('/tasks/', taskGroupData);
@@ -163,11 +160,11 @@ export default function CreateFissionModal({ onClose, onSuccess, initialData = n
           onBlur={e => e.target.style.borderColor = 'var(--border-default)'}
         />
 
-        {/* Global prompt */}
+        {/* Prompt template — Doubao 会以此为模板洗稿出 N 条差异化视频指令 */}
         <textarea
           className={inputClass + " h-20 resize-none custom-scrollbar"}
           style={inputStyle}
-          placeholder="全局模糊指令: 例如 '产品放在室内阳光充足的窗台旁...'"
+          placeholder="提示词模板: 例如 '产品在厨房台面缓慢旋转，柔和顶光，蒸汽缭绕'，Doubao 会扩成 N 条差异化的视频指令"
           value={globalPrompt}
           onChange={e => setGlobalPrompt(e.target.value)}
           onFocus={e => e.target.style.borderColor = 'var(--accent)'}
@@ -175,7 +172,7 @@ export default function CreateFissionModal({ onClose, onSuccess, initialData = n
         />
         
         {/* Params grid */}
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-2 gap-3">
           <div className="flex flex-col gap-1">
             <span className="text-[10px] font-bold uppercase tracking-wider" style={{ color: 'var(--text-tertiary)' }}>画面比例</span>
             <select value={aspectRatio} onChange={e => setAspectRatio(e.target.value)}
@@ -183,15 +180,6 @@ export default function CreateFissionModal({ onClose, onSuccess, initialData = n
               <option value="9:16">9:16 (竖屏)</option>
               <option value="16:9">16:9 (横屏)</option>
               <option value="1:1">1:1 (正方)</option>
-            </select>
-          </div>
-          <div className="flex flex-col gap-1">
-            <span className="text-[10px] font-bold uppercase tracking-wider" style={{ color: 'var(--text-tertiary)' }}>精度</span>
-            <select value={resolution} onChange={e => setResolution(e.target.value)}
-              className={inputClass + " cursor-pointer"} style={{...inputStyle, color: 'var(--accent)'}}>
-              <option value="standard">标清</option>
-              <option value="2k">2K 超清</option>
-              <option value="4k">4K 原画</option>
             </select>
           </div>
           <div className="flex flex-col gap-1">
@@ -207,27 +195,56 @@ export default function CreateFissionModal({ onClose, onSuccess, initialData = n
 
         {/* Video engine */}
         <div className="flex flex-col gap-1">
-          <span className="text-[10px] font-bold uppercase tracking-wider" style={{ color: 'var(--text-tertiary)' }}>预选视频引擎</span>
+          <span className="text-[10px] font-bold uppercase tracking-wider" style={{ color: 'var(--text-tertiary)' }}>视频引擎</span>
           <select value={videoModel} onChange={e => setVideoModel(e.target.value)}
             className={inputClass + " cursor-pointer"} style={inputStyle}>
             {isHolo ? (
-              <>
+              <optgroup label="HOLO · Veo">
                 {VIDEO_MODELS.holo.i2v.portrait.map(o => (
-                  <option key={o.value} value={o.value}>{o.label}（竖）</option>
+                  <option key={'p-'+o.value} value={o.value}>{o.label}（竖）</option>
                 ))}
                 {VIDEO_MODELS.holo.i2v.landscape.map(o => (
-                  <option key={o.value} value={o.value}>{o.label}（横）</option>
+                  <option key={'l-'+o.value} value={o.value}>{o.label}（横）</option>
                 ))}
-              </>
+              </optgroup>
             ) : (
-              <>
+              <optgroup label="Flow2API · Veo">
                 <option value="veo_3_1_i2v_s_fast_portrait_ultra_relaxed">Veo Relax (高品质追求)</option>
                 <option value="veo_3_1_i2v_s_fast_portrait_ultra_fl">Veo Fast (效率优先)</option>
                 <option value="veo_i2v_lite">Veo I2V Lite (首帧，轻量化)</option>
-              </>
+              </optgroup>
             )}
+            <optgroup label="即梦 · Seedance 2.0">
+              <option value="dreamina/seedance2.0fast">Seedance 2.0 Fast · 720p（推荐，~30c/15s）</option>
+              <option value="dreamina/seedance2.0">Seedance 2.0 标准 · 720p</option>
+              <option value="dreamina/seedance2.0fast_vip">Seedance 2.0 Fast · VIP 1080p</option>
+              <option value="dreamina/seedance2.0_vip">Seedance 2.0 · VIP 1080p</option>
+            </optgroup>
           </select>
         </div>
+
+        {/* Auto-download toggle */}
+        <label className="flex items-start gap-2 cursor-pointer select-none px-1"
+          title="任务完成后浏览器自动下载视频到默认下载文件夹（HTTP 也支持）。开关持久化到 localStorage。">
+          <input
+            type="checkbox"
+            checked={autoDownload}
+            onChange={e => {
+              const v = e.target.checked;
+              setAutoDownload(v);
+              localStorage.setItem('fission_auto_download', v ? 'true' : 'false');
+            }}
+            className="mt-0.5 w-4 h-4 accent-[var(--accent)] cursor-pointer flex-shrink-0"
+          />
+          <div className="flex flex-col gap-0.5">
+            <span className="text-xs font-bold" style={{ color: 'var(--text-secondary)' }}>
+              视频完成后自动下载到本地下载文件夹
+            </span>
+            <span className="text-[10px]" style={{ color: 'var(--text-tertiary)' }}>
+              浏览器原生 a[download]，裸 HTTP 也能用；落到 Chrome 默认下载位置
+            </span>
+          </div>
+        </label>
 
         {/* Submit */}
         <button onClick={handleSubmit} disabled={submitting}
