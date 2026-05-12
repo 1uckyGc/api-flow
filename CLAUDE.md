@@ -72,6 +72,10 @@ frontend/                   Vite + React 单页应用
                             / FissionDetailsModal（STEP 01 原始 / STEP 02 Doubao 洗稿双栏 diff / STEP 03 最终 prompt）/ DetailPanel（含 Seedance 实时日志条 + 自动下载 useEffect）
     pages/replicate/        ReplicatePage（壳）/ InputForm / AwaitingLLMOutput / GUList（双产线卡片+JSON 复制按钮）
     components/             Layout / Inbox / Gallery / Settings / Studio / TaskCreate / Toolbox / Utility
+                            + ErrorBoundary（全局错误兜底，DashboardLayout 内包路由）
+                            + FolderPickerBar（File System Access API 顶部条，scope=fission/automation/gallery）
+    hooks/useAutoSaveFolder.js  统一文件夹 handle 管理 + saveFromUrl（fetch → getFileHandle({create:true}) → writable.write）
+    utils/idb.js            IndexedDB store `api_flow_idb.folders` 持久化 directory handle
     constants/models.js     前端模型注册表（与后端 model_registry.py 对齐 + providerOf() 前缀检测）
     stores/                 Zustand store — auth / settings / task / theme / workshop
 docker-compose.yml          5 服务编排：worker 命令 `--beat --pool=threads --max-tasks-per-child=200 -c ${MAX_CONCURRENT_TASKS:-50}`；
@@ -274,11 +278,26 @@ alembic upgrade head
   - `LLM_SYSTEM_PROMPT`（`prompts.py`）已重写为**洗稿编辑**人设：保留模板核心结构（产品名/视觉风格/相机参数），只自动识别可变要素（具体时间/色温/光线方向/场景小物等）做随机替换，输出 N 条相似但变量不同的提示词；**禁止主动添加模板没有的场景/光线/景别**。FissionDetailsModal STEP 02 用 `diff` npm 包 + `diffWords` 渲染**双栏 PR-style 差异**（左 STEP01 原始红色删除线，右 STEP02 改后绿色高亮），让用户一眼看到 Doubao 改了哪些可变要素
   - DetailPanel 用 `isVideoFirstFission = rootGroup.task_type === 'image_to_video' && source === 'FISSION'` 检测；新形态**隐藏 stage-1 图像层**，把 rootGroup 直接当 videos 容器渲染；老形态保持 3 段（image / video / extend）
   - CreateFissionModal 顶部加 **"视频完成后自动下载到默认下载夹"checkbox**（持久化 `localStorage.fission_auto_download`）；DetailPanel useEffect 监听 success 视频，用 `<a download>` 触发浏览器原生下载（**裸 HTTP 也支持**，不需要 secure context）；`localStorage.fission_downloaded` 集合（cap 1000）防刷新重复触发
+- **React Hooks 必须在 early return 之前 + 全局 ErrorBoundary**（2026-05-12 黑屏教训）。`pages/fission/DetailPanel.jsx` 曾把 `useEffect(...)` 放在 `if (!rootGroup) return` / `if (rootGroup.status === 'pending') return` 两个早返回之后 → 当 rootGroup.status 从 pending 翻 completed 时本次 render 比上次多调一个 hook → React 18 抛 "Rendered more hooks than during the previous render" → 整棵树 unmount → `/fission` 整页黑屏（连 sidebar/logo 都没）。**约定**：所有 hooks（useState/useEffect/useMemo/useRef/自定义 hook）必须在函数顶部、early return 之前声明完毕；派生数据用 null-safe 兜底让 effect 在数据未就绪时也能跑。新增 `components/ErrorBoundary.jsx`，`DashboardLayout.jsx` 用 `<ErrorBoundary key={pathname}>{renderContent()}</ErrorBoundary>` 包住每个路由 —— 单页 throw 不再连累整 app，错误卡片显示 message + componentStack + 重试按钮。
+- **本地文件夹自动保存（File System Access API，HTTPS only）**。`hooks/useAutoSaveFolder.js` + `utils/idb.js` + `components/FolderPickerBar.jsx` 三件套，IndexedDB（store `api_flow_idb.folders`）持久化 directory handle。三处独立 scope：
+  - `scope='fission'` → DetailPanel 顶部 sticky 条，监听 videos + extends_ 的 success → `saveFromUrl(/${output_file}, basename)`
+  - `scope='automation'` → AutomationPage header 右侧，监听所有 task.runtime.thumbnails[status=success]
+  - `scope='gallery'` → EndlessGallery header，监听 allCards filter(isVideo && success)
+  - `savedToFolderRef`（useRef Set）防重复写；mount 时 `idbGetHandle(scope)` + `queryPermission('readwrite')==='granted'` 才自动启用，permission 是 'prompt' 时只显示文件夹名（标"需重新授权"），等用户手势再 requestPermission（API 限制：requestPermission 必须 user gesture 触发）
+  - 老的 fission `<a download>` checkbox 路径作为 fallback 保留（裸 HTTP 时唯一可用方案）
 - **Dreamina Seedance 串行 batch**（`workers/dreamina_batch.py`）。OAuth 单账户并行多任务会撞并发上限 + 失败一条整批前功尽弃，所以 router 检测到 group `model.startswith("dreamina/seedance")` 单次投 `run_dreamina_serial_batch.delay(group_id)`，内部 for-loop 逐条调 `dreamina_client.image2video`：
-  - 每 60s 通过 `progress_callback` 节流回传 `{queue_idx, gen_status, fail_reason, elapsed_sec}`；batch 把它翻译成进度文本写到 `task.progress_message` + `group.progress_message` + WS push（`TASK_PROGRESS` / `GROUP_PROGRESS`）
+  - 每 60s 通过 `progress_callback` 节流回传 `{queue_idx, gen_status, fail_reason, elapsed_sec, submit_id}`；batch 把它翻译成进度文本写到 `task.progress_message` + `group.progress_message` + WS push（`TASK_PROGRESS` / `GROUP_PROGRESS`）
   - phase 判定**优先看 queue_idx**（实测 dreamina query_result 返 `gen_status="querying" + queue_info.queue_idx=2150`，要把 2150 这个排队位置秀出来；旧逻辑只在 `gen_status=="queuing"` 才显示位置，导致 querying 状态丢掉真实位置）
   - 完成后调 `extract_video_poster()` 写 `task.output_thumbnail`（**绕过 process_generation 主流程，必须手动调一次**，否则缩略图 NULL → 前端 `<video poster>` 回退 `#t=0.001` 不一定 work → 白底）
   - 失败时 `result.fail_reason` 直接落到 `task.error_message`，前端 GUList `formatTaskError` 识别"dreamina 未登录"等典型错误
+- **dreamina poll 30min 用完不算失败 — `still_queuing` 续 poll**（2026-05-12 修 false-negative）。dreamina 队列深度可达 3000+，单任务排队 1-3h 是常态。老代码 poll 到 `max_wait_sec=1800` 硬切判 FAILED → 上游其实还在跑，UI 报"失败"是误判。新流程：
+  - `dreamina_client.image2video / multimodal2video` poll 预算到点时返回 `DreaminaResult(success=False, gen_status="still_queuing", submit_id=sid, ...)` —— 不再是 `gen_status="timeout"` + FAILED 语义
+  - `dreamina_batch` 见 `still_queuing` 不打 FAILED，task 保持 `RUNNING` + sid，clear `error_message`，发 `run_dreamina_serial_batch.apply_async(args=[gid, [tid]], countdown=60)` —— 60s 后自动重新进 batch 续 poll
+  - group 状态机：still_running > 0 时 `group.status = PROCESSING` + progress "续 poll 中 N"，不再误标 COMPLETED
+  - submit retry 拉长：`SUBMIT_MAX_TRIES 4→8`、`SUBMIT_RETRY_BACKOFF 30s→45s`，总扛 ~5min 账户级 ExceedConcurrencyLimit 抖动
+- **dreamina_sid 必持久化 + sweeper 跳过**（2026-05-12）。worker 崩在首次 60s callback 前会让 sid 永久丢失（task.config_json={}），worker_ready 续 poll 无从下手，2h sweeper 一刀切 FAILED → 上游任务被孤立。新策略：
+  - `dreamina_client` 新增 `sid_persist_callback: Optional[Callable[[str], None]]` 参数；`_extract_submit_id(out)` 拿到 sid 紧跟一行立即调 callback；`dreamina_batch::make_sid_persist(task)` 立刻 `task.config_json["dreamina_sid"] = sid; db.commit()`，不再等 60s 节流。窗口期归零
+  - `cleanup_tasks.py::mark_zombie_running_failed` 在 Python 层过滤 `config_json.dreamina_sid` 存在的任务，返回新字段 `skipped_dreamina_sid`。有 sid 的 RUNNING task 交给 `dreamina_batch` 的 still_queuing 续 poll + `worker_ready` 信号兜底，sweeper 不管
 - **同步 WS 推送 helper**（`workers/_ws_sync.py::notify_ws_sync`）。sync Celery 任务（dreamina_batch）无法用 async `notify_ws`，封一个 `httpx.Client` 同步版调 `/ws/internal/notify` 端点。**不要在 sync 上下文调原 async notify_ws**，会炸。
 - **删除 Task 必须先解绑 ApiCallLog FK**。`ApiCallLog.task_id` / `group_id` 都是 `ForeignKey(... nullable=True)` 但**没设 `ondelete='SET NULL'`**（默认 RESTRICT）。直接 `db.delete(task)` 会 `psycopg2.errors.ForeignKeyViolation`。修：`routers/tasks.py::_unbind_api_call_logs(db, task_ids, group_ids)` 在 4 个删除端点（`delete_task_group` / `clear_failed_tasks` / `delete_single_task` / `batch_delete_tasks`）的 `db.delete` **之前**先 UPDATE SET NULL；cleanup_tasks 早就用了同款 pattern，router 之前漏。
 - **`/api/logs/providers` Dreamina metrics 加 running_local**。dreamina CLI 不暴露账户级并发上限，但能算"本系统正在占用多少 dreamina 槽"——查 DB `Task.status=RUNNING` 且 model/model_version 属于 dreamina/seedance 的任务数。admin 看 /logs 顶部 Dreamina 卡片可见。
@@ -291,7 +310,7 @@ alembic upgrade head
 - **HOLO Sora-2 必传 size 字段**。`Sora-2-12` / `Sora-2-16`（严格大小写）submit payload 必须显式带 `size: "1280x720"` 或 `"720x1280"`，否则上游 400。`_generate_holo` 检测 `model.lower().startswith("sora-")` 时自动注入：i2v 场景用 PIL 读 image_paths[0] 宽高决定横/竖；纯 t2v 回落 720x1280 竖屏。其他比例（9:14 等）不支持。
 - **cc123 sd-2 系列固定 15s**。`dispatcher._run_cc123` + `replicate_tasks.run_video_via_cc123` 都检测 `cc123_model.startswith("sd-2")` 强制 duration=15（其他时长 cc123 上游未开通通道，会报 model_not_found）。前端下拉文案对应改 `(Seedance 2.0 · 15s 标准)`。
 - **僵尸任务每小时自动清 + 按钮也清**。worker 崩溃/重启/网络断会留下 `status=running` 或 `queued` 永远不更新的"卡住"任务（UI 一直显示"生成中..."）。两层兜底：
-  - `cleanup_tasks.py::mark_zombie_running_failed` celery beat 每小时 `:15` 跑：`status in (running, queued) AND updated_at < now-2h` → 全部打 `failed` + `error_message` + `update_group_status` 刷新组状态
+  - `cleanup_tasks.py::mark_zombie_running_failed` celery beat 每小时 `:15` 跑：`status in (running, queued) AND updated_at < now-2h` → 全部打 `failed` + `error_message` + `update_group_status` 刷新组状态。**例外**（2026-05-12 起）：带 `config_json.dreamina_sid` 的 RUNNING task **跳过**，交给 `dreamina_batch` still_queuing 续 poll + worker_ready 续命；返回值多 `skipped_dreamina_sid` 字段
   - `DELETE /api/tasks/failed/clear/all` 用户按钮**同时清 failed + 僵尸**（>2h running/queued），返回 `{failed: N, zombies: M, message}`；前端 EndlessGallery alert 弹具体数字反馈
 - **EndlessGallery 多选浮条删除按钮**（`L1110`）已存在但不显眼。多选模式激活 + `selectedTasks.size > 0` 时底部浮动操作栏右侧出 `<Trash2/> 删除` 红按钮（handleBatchDelete 调 `POST /api/tasks/batch-delete`）。alert 反馈成功/失败具体错误（不再只 console.error）。
 - **Caddy :80 反代 → frontend :8090**（2026-05-11 起）。`/etc/caddy/Caddyfile` 配 `:80 { reverse_proxy localhost:8090 { header_up ... } }`，让 `http://154.51.41.140/`（裸 IP，无端口）直接进入 frontend。WebSocket 升级 Caddy v2 reverse_proxy 自动处理。**两路径都可用**：`http://154.51.41.140/`（经 Caddy 反代）和 `http://154.51.41.140:8090/`（端口直连）。Caddyfile 备份 `Caddyfile.bak.20260511`。后续接域名 + HTTPS 只需把 Caddyfile 顶部 `:80` 改成 `your-domain.com`，Caddy 自动 Let's Encrypt。

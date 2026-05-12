@@ -8,6 +8,8 @@ import useTaskStore from '../../stores/useTaskStore';
 import api from '../../api/client';
 import { useProvider } from '../../hooks/useProvider';
 import { getDefaultModel } from '../../constants/models';
+import FolderPickerBar from '../FolderPickerBar';
+import { useAutoSaveFolder } from '../../hooks/useAutoSaveFolder';
 
 /**
  * 无尽画廊 —— 按时间倒序平铺展示当前模式下所有历史生成结果。
@@ -44,6 +46,22 @@ export default function EndlessGallery() {
   useEffect(() => {
     localStorage.setItem('endless_gallery_cols', columnCount.toString());
   }, [columnCount]);
+
+  // Dreamina 并发状态指示器：5s 轮询 /api/dreamina/concurrency
+  // 后端用 Redis semaphore 全局限制 5 并发，超出 in flight 数会排队
+  const [dreaminaState, setDreaminaState] = useState({ max: 5, in_flight: 0, waiting: 0, available: true });
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      try {
+        const r = await api.get('/dreamina/concurrency');
+        if (alive && r.data) setDreaminaState(r.data);
+      } catch (e) { /* 静默 */ }
+    };
+    tick();
+    const t = setInterval(() => { if (document.visibilityState === 'visible') tick(); }, 5000);
+    return () => { alive = false; clearInterval(t); };
+  }, []);
 
   // 批量操作 Tab
   const [batchTab, setBatchTab] = useState('i2i'); // 'i2i' | 'i2v' | 'extend' | 'download' | 'delete'
@@ -420,6 +438,27 @@ export default function EndlessGallery() {
     return cards;
   }, [taskGroups, currentTaskType]);
 
+  // 本地文件夹 auto-save（gallery scope）—— 新出现的 success 视频自动写入用户绑定文件夹
+  const { saveFromUrl: saveGalleryToFolder, handle: galleryFolderHandle } = useAutoSaveFolder('gallery');
+  const gallerySavedRef = useRef(new Set());
+  useEffect(() => {
+    if (!galleryFolderHandle) return;
+    const candidates = allCards.filter(c =>
+      c.isVideo &&
+      (c.status === 'SUCCESS' || c.status === 'success') &&
+      c.output_file &&
+      c.id &&
+      !gallerySavedRef.current.has(c.id)
+    );
+    if (candidates.length === 0) return;
+    candidates.forEach(async (c) => {
+      const url = c.output_file.startsWith('/') ? c.output_file : `/${c.output_file}`;
+      const filename = c.output_file.split('/').pop() || `gallery-${c.id.slice(0, 8)}.mp4`;
+      const r = await saveGalleryToFolder(url, filename);
+      if (r.ok) gallerySavedRef.current.add(c.id);
+    });
+  }, [allCards, galleryFolderHandle, saveGalleryToFolder]);
+
   const handleBridgeToVideo = (card) => {
     setDraftData({
       files: [`/${card.output_file}`],
@@ -567,9 +606,37 @@ export default function EndlessGallery() {
               </button>
             ))}
           </div>
+
+          {/* Dreamina 并发指示器：Redis semaphore in_flight 作权威，account_querying 仅 tooltip 辅助 */}
+          {(() => {
+            const inFlight = dreaminaState.in_flight ?? 0;          // 本系统语义 (Redis semaphore)
+            const accountQ = dreaminaState.account_querying ?? 0;    // dreamina list_task 本地缓存，仅参考
+            const max = dreaminaState.max ?? 2;
+            const waiting = dreaminaState.waiting ?? 0;
+            const isFull = inFlight >= max;
+            const isIdle = inFlight === 0 && waiting === 0;
+            const bg = isFull ? 'rgba(248,113,113,0.15)' : isIdle ? 'rgba(52,211,153,0.15)' : 'rgba(251,191,36,0.15)';
+            const fg = isFull ? '#f87171' : isIdle ? '#34d399' : '#fbbf24';
+            const dot = isFull ? '#f87171' : isIdle ? '#34d399' : '#fbbf24';
+            const txt = isFull
+              ? `Dreamina 满载 ${inFlight}/${max}${waiting > 0 ? ` · 排队 ${waiting}` : ''}`
+              : isIdle
+                ? `Dreamina 空闲 0/${max}`
+                : `Dreamina ${inFlight}/${max}${waiting > 0 ? ` · 等 ${waiting}` : ''}`;
+            const tip = `本系统正在跑 ${inFlight}/${max}（Redis semaphore 权威）\n等待槽 ${waiting} 个\n上游 dreamina 本地缓存 querying ${accountQ}（仅参考，可能 stale）`;
+            return (
+              <div className="flex items-center gap-1.5 ml-3 px-2.5 py-1 rounded-md"
+                   title={tip}
+                   style={{ background: bg, border: `1px solid ${fg}33` }}>
+                <span className="w-1.5 h-1.5 rounded-full" style={{ background: dot, boxShadow: `0 0 6px ${dot}` }} />
+                <span className="text-[10px] font-bold leading-none" style={{ color: fg }}>{txt}</span>
+              </div>
+            );
+          })()}
         </div>
         
         <div className="flex items-center gap-3">
+          <FolderPickerBar scopeKey="gallery" label="新视频自动保存" />
           {allCards.length > 0 && (
             <div className="flex items-center gap-2">
               {/* 选择模式：全选/反选 仅在选择模式激活后显示 */}
