@@ -214,11 +214,17 @@ export default function CreateFissionModal({ onClose, onSuccess, initialData = n
                 <option value="veo_i2v_lite">Veo I2V Lite (首帧，轻量化)</option>
               </optgroup>
             )}
-            <optgroup label="即梦 · Seedance 2.0">
+            <optgroup label="即梦 · Seedance 2.0 · 首帧锚定">
               <option value="dreamina/seedance2.0fast">Seedance 2.0 Fast · 720p（推荐，~30c/15s）</option>
               <option value="dreamina/seedance2.0">Seedance 2.0 标准 · 720p</option>
               <option value="dreamina/seedance2.0fast_vip">Seedance 2.0 Fast · VIP 1080p</option>
               <option value="dreamina/seedance2.0_vip">Seedance 2.0 · VIP 1080p</option>
+            </optgroup>
+            <optgroup label="即梦 · Seedance 2.0 · 全能参考（multimodal）">
+              <option value="dreamina/seedance2.0fast-omniref">Seedance 2.0 Fast · 全能参考 720p</option>
+              <option value="dreamina/seedance2.0-omniref">Seedance 2.0 标准 · 全能参考 720p</option>
+              <option value="dreamina/seedance2.0fast_vip-omniref">Seedance 2.0 Fast · VIP 全能参考 1080p</option>
+              <option value="dreamina/seedance2.0_vip-omniref">Seedance 2.0 · VIP 全能参考 1080p</option>
             </optgroup>
           </select>
         </div>

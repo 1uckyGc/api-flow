@@ -470,10 +470,14 @@ export default function ToolPanel() {
                       <option value="dreamina/t2v-default">即梦 · text2video</option>
                     ) : (
                       <>
-                        <option value="dreamina/seedance2.0fast">即梦 · seedance 2.0 fast (720p · 推荐)</option>
-                        <option value="dreamina/seedance2.0">即梦 · seedance 2.0 标准 (720p)</option>
-                        <option value="dreamina/seedance2.0fast_vip">即梦 · seedance 2.0 fast · VIP (1080p)</option>
-                        <option value="dreamina/seedance2.0_vip">即梦 · seedance 2.0 · VIP (1080p)</option>
+                        <option value="dreamina/seedance2.0fast">即梦 · seedance 2.0 fast (720p · 首帧 · 推荐)</option>
+                        <option value="dreamina/seedance2.0">即梦 · seedance 2.0 标准 (720p · 首帧)</option>
+                        <option value="dreamina/seedance2.0fast_vip">即梦 · seedance 2.0 fast · VIP (1080p · 首帧)</option>
+                        <option value="dreamina/seedance2.0_vip">即梦 · seedance 2.0 · VIP (1080p · 首帧)</option>
+                        <option value="dreamina/seedance2.0fast-omniref">即梦 · seedance 2.0 fast · 全能参考 (720p)</option>
+                        <option value="dreamina/seedance2.0-omniref">即梦 · seedance 2.0 标准 · 全能参考 (720p)</option>
+                        <option value="dreamina/seedance2.0fast_vip-omniref">即梦 · seedance 2.0 fast · VIP · 全能参考 (1080p)</option>
+                        <option value="dreamina/seedance2.0_vip-omniref">即梦 · seedance 2.0 · VIP · 全能参考 (1080p)</option>
                       </>
                     )}
                     <option disabled>──── 第三方 · cc123.ai (Seedance / Sora) ────</option>

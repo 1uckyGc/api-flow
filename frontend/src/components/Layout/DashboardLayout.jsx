@@ -11,6 +11,8 @@ import WorkflowBuilder from '../../pages/workshop/WorkflowBuilder';
 import WorkflowRunner from '../../pages/workshop/WorkflowRunner';
 import Logs from '../../pages/Logs';
 import ReplicatePage from '../../pages/replicate/ReplicatePage';
+import AutomationPage from '../../pages/automation/AutomationPage';
+import ErrorBoundary from '../ErrorBoundary';
 
 const FISSION_PATHS = ['/fission'];
 
@@ -23,10 +25,12 @@ export default function DashboardLayout() {
   const isWorkshopRun = pathname.startsWith('/workshop/run');
   const isLogsPage = pathname.startsWith('/logs');
   const isReplicateMode = pathname.startsWith('/replicate');
+  const isAutomationMode = pathname.startsWith('/auto');
 
   const renderContent = () => {
     if (isLogsPage) return <Logs />;
     if (isReplicateMode) return <ReplicatePage />;
+    if (isAutomationMode) return <AutomationPage />;
     if (isFissionMode) return <FissionWorkspace />;
     if (isDirectorMode) return <DirectorPage />;
     if (isWorkshopIndex) return <WorkshopPage />;
@@ -41,7 +45,7 @@ export default function DashboardLayout() {
       <GlobalNav />
 
       <main className="flex-1 flex flex-col relative z-10 overflow-hidden" style={{ background: 'var(--surface-0)' }}>
-        {renderContent()}
+        <ErrorBoundary key={pathname}>{renderContent()}</ErrorBoundary>
       </main>
 
       <SettingsModal />

@@ -6,7 +6,7 @@ import useSettingsStore from '../../stores/useSettingsStore';
 import useThemeStore from '../../stores/useThemeStore';
 import {
   Dna, PenLine, Image, Film, Clapperboard, FolderOpen,
-  Settings, LogOut, Sun, Moon, Blocks, ScrollText, Copy
+  Settings, LogOut, Sun, Moon, Blocks, ScrollText, Copy, Zap
 } from 'lucide-react';
 
 const navItems = [
@@ -19,6 +19,7 @@ const navItems = [
   { path: '/i2i', icon: Image, label: '图生图' },
   { path: '/t2v', icon: Film, label: '文生视频' },
   { path: '/i2v', icon: Clapperboard, label: '图生视频' },
+  { path: '/auto', icon: Zap, label: '自动化' },
   { path: '/replicate', icon: Copy, label: '复刻视频' },
   { dividerAfter: true },
   { path: '/assets', icon: FolderOpen, label: '资产库' },

@@ -19,8 +19,9 @@ export default function FissionWorkspace() {
 
   const fetchJobs = async () => {
     try {
-      const res = await api.get('/tasks/'); 
-      const filtered = res.data.filter(g => (g.source === 'FISSION' || g.source === 'PIPELINE') && !g.fission_parent_id);
+      const res = await api.get('/tasks/');
+      const arr = Array.isArray(res.data) ? res.data : [];
+      const filtered = arr.filter(g => g && (g.source === 'FISSION' || g.source === 'PIPELINE') && !g.fission_parent_id);
       setActiveJobs(filtered);
 
       if (!activeJobIdRef.current && filtered.length > 0) setActiveJobId(filtered[0].id);
@@ -61,7 +62,7 @@ export default function FissionWorkspace() {
   return (
     <div className="flex h-full w-full text-sm" style={{ background: 'var(--surface-0)', color: 'var(--text-secondary)' }}>
       <Sidebar
-        activeJobId={activeJobId} 
+        activeJobId={activeJobId}
         setActiveJobId={setActiveJobId}
         activeJobs={activeJobs}
         onOpenCreate={handleOpenCreate}
@@ -77,7 +78,7 @@ export default function FissionWorkspace() {
       )}
 
       {isModalOpen && (
-        <CreateFissionModal 
+        <CreateFissionModal
           initialData={retryData}
           onClose={() => { setIsModalOpen(false); setRetryData(null); }}
           onSuccess={(newId) => {
@@ -90,7 +91,7 @@ export default function FissionWorkspace() {
       )}
 
       {detailJob && (
-        <FissionDetailsModal 
+        <FissionDetailsModal
           job={detailJob}
           onClose={() => setDetailJob(null)}
         />

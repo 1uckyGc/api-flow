@@ -1,9 +1,11 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { AlertTriangle, Brain, Flame, Film, Clock, ChevronDown, Check, RefreshCw, Trash2 } from 'lucide-react';
 import api from '../../api/client';
 import useTaskStore from '../../stores/useTaskStore';
 import { useProvider } from '../../hooks/useProvider';
 import { getDefaultModel } from '../../constants/models';
+import FolderPickerBar from '../../components/FolderPickerBar';
+import { useAutoSaveFolder } from '../../hooks/useAutoSaveFolder';
 
 const SECTION_PAGE_SIZE = 20;
 
@@ -31,6 +33,10 @@ export default function DetailPanel({ activeJobId }) {
   // 每层分页可见数量
   const [sectionVisibleCounts, setSectionVisibleCounts] = useState({});
 
+  // 本地文件夹 auto-save（fission scope）
+  const { saveFromUrl: saveFissionToFolder, handle: fissionFolderHandle } = useAutoSaveFolder('fission');
+  const savedToFolderRef = useRef(new Set());
+
   const toggleSection = (key) => {
     setCollapsedSections((prev) => ({ ...prev, [key]: !prev[key] }));
   };
@@ -46,7 +52,7 @@ export default function DetailPanel({ activeJobId }) {
     if (!activeJobId) return;
     try {
       const res = await api.get(`/tasks/fission/${activeJobId}/chain`);
-      setChainGroups(res.data);
+      setChainGroups(Array.isArray(res.data) ? res.data : []);
     } catch (e) { console.error("加载裂变链失败", e); }
   };
 
@@ -69,91 +75,30 @@ export default function DetailPanel({ activeJobId }) {
     return () => clearInterval(timer);
   }, [activeJobId, allTerminal]);
 
+  // ============ 派生数据（null-safe，必须在 early return 之前算好以保证后续 hooks 总是被调用）============
   const rootGroup = chainGroups.find(g => g.id === activeJobId);
-  if (!rootGroup) {
-    return (
-      <div className="flex-1 h-full bg-[var(--surface-0)] flex items-center justify-center">
-        <div className="text-[var(--text-tertiary)] animate-pulse">努力加载中...</div>
-      </div>
-    );
-  }
+  const isFissionFailed = rootGroup ? (rootGroup.status === 'failed' && chainGroups.length <= 1) : false;
+  const isVideoFirstFission = rootGroup ? (rootGroup.task_type === 'image_to_video' && rootGroup.source === 'FISSION') : false;
 
-  const isFissionFailed = rootGroup.status === 'failed' && chainGroups.length <= 1;
-
-  if (rootGroup.status === 'pending' || isFissionFailed) {
-    return (
-      <div className={`flex-1 h-full flex flex-col items-center justify-center relative overflow-hidden bg-[var(--surface-0)]`}>
-        <div className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] blur-[120px] rounded-full animate-pulse ${isFissionFailed ? 'bg-red-600/10' : 'bg-indigo-600/10'}`}></div>
-        <div className="relative w-48 h-48 mb-12">
-          <div className={`absolute inset-0 border-4 rounded-full ${isFissionFailed ? 'border-red-500/20' : 'border-indigo-500/20'}`}></div>
-          {!isFissionFailed && (
-            <>
-              <div className="absolute inset-0 border-t-4 border-indigo-500 rounded-full animate-spin [animation-duration:3s]"></div>
-              <div className="absolute inset-4 border-b-4 border-fuchsia-500 rounded-full animate-spin [animation-duration:2s] [animation-direction:reverse]"></div>
-              <div className="absolute inset-8 border-l-4 border-cyan-400 rounded-full animate-spin [animation-duration:1.5s]"></div>
-            </>
-          )}
-          <div className="absolute inset-0 flex items-center justify-center">
-            <span className={`text-4xl filter ${isFissionFailed ? 'drop-shadow-[0_0_10px_rgba(239,68,68,0.8)]' : 'drop-shadow-[0_0_10px_rgba(99,102,241,0.8)]'}`}>
-              {isFissionFailed ? <Flame size={32} /> : <Brain size={32} />}
-            </span>
-          </div>
-        </div>
-        <h3 className={`text-xl font-black mb-2 tracking-tight ${isFissionFailed ? 'text-[var(--error)]' : 'text-[var(--text-primary)]'}`}>
-          {isFissionFailed ? '推理引擎发生异常' : '创意引擎正在深度推理'}
-        </h3>
-        <p className="text-[var(--text-tertiary)] text-sm mb-8 font-medium italic">「{rootGroup.title}」</p>
-        <div className={`w-full max-w-lg bg-[var(--surface-1)] border rounded-2xl p-4 backdrop-blur-xl shadow-2xl space-y-2 ${isFissionFailed ? 'border-red-500/20' : 'border-[var(--border-subtle)]'}`}>
-          <div className="flex items-center gap-2 border-b border-[var(--border-subtle)] pb-2 mb-2">
-            <div className="flex gap-1">
-              <div className="w-2 h-2 rounded-full bg-red-500/50"></div>
-              <div className="w-2 h-2 rounded-full bg-yellow-500/50"></div>
-              <div className="w-2 h-2 rounded-full bg-green-500/50"></div>
-            </div>
-            <span className="text-[10px] text-[var(--text-tertiary)] font-mono uppercase tracking-widest ml-1">DEEPSEEK REASONING LOGS</span>
-          </div>
-          <div className="h-24 overflow-y-auto font-mono text-[11px] space-y-1.5 custom-scrollbar">
-            <div className="text-[var(--text-tertiary)] flex gap-2">
-              <span className="text-indigo-400 opacity-50">[{new Date(rootGroup.created_at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'})}]</span>
-              <span className="text-[var(--text-secondary)]">系统初始化完成...</span>
-            </div>
-            <div className={`flex gap-2 ${isFissionFailed ? 'text-red-400/80' : 'text-[var(--text-tertiary)]'}`}>
-              <span className={`${isFissionFailed ? 'text-red-500' : 'text-indigo-400'} opacity-50`}>[{new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'})}]</span>
-              <span className={`${isFissionFailed ? 'text-red-300' : 'text-indigo-300'} font-bold`}>{isFissionFailed ? '阻断报告:' : '思维碎片:'}</span>
-              <span className={`${isFissionFailed ? 'text-red-100' : 'text-[var(--text-secondary)]'} animate-in fade-in slide-in-from-left-1 duration-500`}>
-                {taskProgressMap[`group_${rootGroup.id}`] || rootGroup.progress_message || (isFissionFailed ? "由于网络或认证问题，推理链条已中断" : "正在等待 DeepSeek 推理回传...")}
-              </span>
-            </div>
-            {(taskProgressMap[`group_${rootGroup.id}`] || rootGroup.progress_message) && (
-              <div className="text-emerald-400/80 animate-pulse flex gap-2 pl-14 font-bold">
-                <span>» 执行注入: 语义发散与光影解构...</span>
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // 新形态：source=FISSION + task_type=image_to_video → rootGroup 本身就是视频组，
-  // 不存在阶段 1 图像层。老形态：rootGroup 是图像组，有 fission_stage='videos' 子组。
-  const isVideoFirstFission = rootGroup.task_type === 'image_to_video' && rootGroup.source === 'FISSION';
-
-  const imageGroups = isVideoFirstFission
+  const imageGroups = !rootGroup
     ? []
-    : chainGroups.filter(g => !g.fission_parent_id || g.fission_stage === 'images');
-  const videoGroups = isVideoFirstFission
-    ? [rootGroup]
-    : chainGroups.filter(g => g.fission_stage === 'videos');
-  const extendGroups = chainGroups.filter(g => g.fission_stage === 'extended' || g.config_json?.isExtension);
+    : isVideoFirstFission
+      ? []
+      : chainGroups.filter(g => !g.fission_parent_id || g.fission_stage === 'images');
+  const videoGroups = !rootGroup
+    ? []
+    : isVideoFirstFission
+      ? [rootGroup]
+      : chainGroups.filter(g => g.fission_stage === 'videos');
+  const extendGroups = !rootGroup
+    ? []
+    : chainGroups.filter(g => g.fission_stage === 'extended' || g.config_json?.isExtension);
 
   const images = imageGroups.flatMap(g => g.tasks || []);
   const videos = videoGroups.flatMap(g => g.tasks || []);
   const extends_ = extendGroups.flatMap(g => g.tasks || []);
 
-  // 自动下载：CreateFissionModal 开关持久化到 localStorage.fission_auto_download。
-  // 监听本 group 下所有 success 视频，新增的触发浏览器原生下载到默认下载夹。
-  // localStorage.fission_downloaded 记录已下载过的 task.id 集合，避免页面刷新重复触发。
+  // 自动下载到浏览器默认下载夹（fission_auto_download checkbox 模式 —— 老逻辑保留）
   useEffect(() => {
     if (localStorage.getItem('fission_auto_download') !== 'true') return;
     let dl;
@@ -173,22 +118,113 @@ export default function DetailPanel({ activeJobId }) {
       document.body.removeChild(a);
       dl.add(t.id);
     });
-    // 集合 cap 1000 条避免无限增长
     const arr = [...dl];
     if (arr.length > 1000) arr.splice(0, arr.length - 1000);
     localStorage.setItem('fission_downloaded', JSON.stringify(arr));
   }, [videos, extends_]);
 
-  // Seedance 串行批处理的实时日志：找到正在跑的 dreamina/seedance 视频 group，
-  // 优先取 taskProgressMap 推送的最新一条，回退 progress_message
-  const activeSeedanceGroup = [...videoGroups, ...extendGroups].find(g => {
-    const m = (g.config_json && g.config_json.model) || '';
-    if (!m.startsWith('dreamina/seedance')) return false;
-    return (g.tasks || []).some(t => t.status === 'running' || t.status === 'queued');
-  });
+  // 自动保存到用户指定本地文件夹（FolderPickerBar 模式）
+  useEffect(() => {
+    if (!fissionFolderHandle) return;
+    const candidates = [...videos, ...extends_].filter(
+      t => t && t.id && t.status === 'success' && t.output_file && !savedToFolderRef.current.has(t.id)
+    );
+    if (candidates.length === 0) return;
+    candidates.forEach(async (t) => {
+      const url = t.output_file.startsWith('/') ? t.output_file : `/${t.output_file}`;
+      const filename = t.output_file.split('/').pop() || `fission-${t.id.slice(0, 8)}.mp4`;
+      const r = await saveFissionToFolder(url, filename);
+      if (r.ok) savedToFolderRef.current.add(t.id);
+    });
+  }, [videos, extends_, fissionFolderHandle, saveFissionToFolder]);
+
+  // Seedance 串行批处理的实时日志（仅当 rootGroup 存在时有意义）
+  const activeSeedanceGroup = rootGroup
+    ? [...videoGroups, ...extendGroups].find(g => {
+        const m = (g.config_json && g.config_json.model) || '';
+        if (!m.startsWith('dreamina/seedance')) return false;
+        return (g.tasks || []).some(t => t.status === 'running' || t.status === 'queued');
+      })
+    : null;
   const seedanceLogLine = activeSeedanceGroup
     ? (taskProgressMap[`group_${activeSeedanceGroup.id}`] || activeSeedanceGroup.progress_message)
     : null;
+
+  // ============ 早返回（hooks 已全部在上方声明完毕，下方仅决定渲染分支）============
+  if (!rootGroup) {
+    return (
+      <div className="flex-1 h-full bg-[var(--surface-0)] flex flex-col">
+        <div className="px-6 py-2 flex items-center justify-end border-b" style={{ borderColor: 'var(--border-subtle)' }}>
+          <FolderPickerBar scopeKey="fission" label="裂变视频自动保存" />
+        </div>
+        <div className="flex-1 flex items-center justify-center">
+          <div className="text-[var(--text-tertiary)] animate-pulse">努力加载中...</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (rootGroup.status === 'pending' || isFissionFailed) {
+    return (
+      <div className="flex-1 h-full flex flex-col bg-[var(--surface-0)]">
+        <div className="px-6 py-2 flex items-center justify-end border-b" style={{ borderColor: 'var(--border-subtle)' }}>
+          <FolderPickerBar scopeKey="fission" label="裂变视频自动保存" />
+        </div>
+        <div className={`flex-1 flex flex-col items-center justify-center relative overflow-hidden`}>
+          <div className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] blur-[120px] rounded-full animate-pulse ${isFissionFailed ? 'bg-red-600/10' : 'bg-indigo-600/10'}`}></div>
+          <div className="relative w-48 h-48 mb-12">
+            <div className={`absolute inset-0 border-4 rounded-full ${isFissionFailed ? 'border-red-500/20' : 'border-indigo-500/20'}`}></div>
+            {!isFissionFailed && (
+              <>
+                <div className="absolute inset-0 border-t-4 border-indigo-500 rounded-full animate-spin [animation-duration:3s]"></div>
+                <div className="absolute inset-4 border-b-4 border-fuchsia-500 rounded-full animate-spin [animation-duration:2s] [animation-direction:reverse]"></div>
+                <div className="absolute inset-8 border-l-4 border-cyan-400 rounded-full animate-spin [animation-duration:1.5s]"></div>
+              </>
+            )}
+            <div className="absolute inset-0 flex items-center justify-center">
+              <span className={`text-4xl filter ${isFissionFailed ? 'drop-shadow-[0_0_10px_rgba(239,68,68,0.8)]' : 'drop-shadow-[0_0_10px_rgba(99,102,241,0.8)]'}`}>
+                {isFissionFailed ? <Flame size={32} /> : <Brain size={32} />}
+              </span>
+            </div>
+          </div>
+          <h3 className={`text-xl font-black mb-2 tracking-tight ${isFissionFailed ? 'text-[var(--error)]' : 'text-[var(--text-primary)]'}`}>
+            {isFissionFailed ? '推理引擎发生异常' : 'LLM 正在按模板洗稿'}
+          </h3>
+          <p className="text-[var(--text-tertiary)] text-sm mb-8 font-medium italic">「{rootGroup.title}」</p>
+          <div className={`w-full max-w-lg bg-[var(--surface-1)] border rounded-2xl p-4 backdrop-blur-xl shadow-2xl space-y-2 ${isFissionFailed ? 'border-red-500/20' : 'border-[var(--border-subtle)]'}`}>
+            <div className="flex items-center gap-2 border-b border-[var(--border-subtle)] pb-2 mb-2">
+              <div className="flex gap-1">
+                <div className="w-2 h-2 rounded-full bg-red-500/50"></div>
+                <div className="w-2 h-2 rounded-full bg-yellow-500/50"></div>
+                <div className="w-2 h-2 rounded-full bg-green-500/50"></div>
+              </div>
+              <span className="text-[10px] text-[var(--text-tertiary)] font-mono uppercase tracking-widest ml-1">LLM 洗稿日志</span>
+            </div>
+            <div className="h-24 overflow-y-auto font-mono text-[11px] space-y-1.5 custom-scrollbar">
+              <div className="text-[var(--text-tertiary)] flex gap-2">
+                <span className="text-indigo-400 opacity-50">[{new Date(rootGroup.created_at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'})}]</span>
+                <span className="text-[var(--text-secondary)]">系统初始化完成...</span>
+              </div>
+              <div className={`flex gap-2 ${isFissionFailed ? 'text-red-400/80' : 'text-[var(--text-tertiary)]'}`}>
+                <span className={`${isFissionFailed ? 'text-red-500' : 'text-indigo-400'} opacity-50`}>[{new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'})}]</span>
+                <span className={`${isFissionFailed ? 'text-red-300' : 'text-indigo-300'} font-bold`}>{isFissionFailed ? '阻断报告:' : '思维碎片:'}</span>
+                <span className={`${isFissionFailed ? 'text-red-100' : 'text-[var(--text-secondary)]'} animate-in fade-in slide-in-from-left-1 duration-500`}>
+                  {taskProgressMap[`group_${rootGroup.id}`] || rootGroup.progress_message || (isFissionFailed ? "由于网络或认证问题，推理链条已中断" : "正在等待 LLM 洗稿回传...")}
+                </span>
+              </div>
+              {(taskProgressMap[`group_${rootGroup.id}`] || rootGroup.progress_message) && (
+                <div className="text-emerald-400/80 animate-pulse flex gap-2 pl-14 font-bold">
+                  <span>» 按模板结构识别可变要素，随机替换中...</span>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ============ 以下是渲染主体（不再有 hooks）============
 
   const toggleSelection = (setFn, id, e) => {
     e.stopPropagation();
@@ -239,7 +275,7 @@ export default function DetailPanel({ activeJobId }) {
     if (!videoPrompt.trim()) return alert('请输入视频生成提示词！');
     setGeneratingVideo(true);
     const targetImages = images.filter(img => selectedImages.has(img.id));
-    
+
     let model = rootGroup.config_json?.videoModel || getDefaultModel(provider, 'fission_video');
     let grok_mode = undefined;
     let seconds = undefined;
@@ -364,12 +400,12 @@ export default function DetailPanel({ activeJobId }) {
               {task.status === 'success' ? (
                 label === 'image'
                   ? <img src={task.output_file} className="w-full h-full object-cover" loading="lazy" />
-                  : <video 
-                        className="w-full h-full object-cover" 
-                        muted loop 
-                        preload="none" 
-                        poster={task.output_thumbnail ? `/${task.output_thumbnail}` : `/${task.output_file}#t=0.001`} 
-                        data-src={task.output_file} 
+                  : <video
+                        className="w-full h-full object-cover"
+                        muted loop
+                        preload="none"
+                        poster={task.output_thumbnail ? `/${task.output_thumbnail}` : `/${task.output_file}#t=0.001`}
+                        data-src={task.output_file}
                       />
               ) : task.status === 'failed' ? (
                 <div className="flex flex-col items-center justify-center w-full h-full bg-red-500/10 text-red-500/80 p-2 text-center text-[10px] leading-relaxed overflow-y-auto custom-scrollbar">
@@ -378,28 +414,36 @@ export default function DetailPanel({ activeJobId }) {
                   <span className="opacity-70">{task.error_message || '未知错误'}</span>
                 </div>
               ) : (
-                <div className={`flex flex-col items-center justify-center w-full h-full bg-${colorTheme}-500/5`}>
-                  <div className={`w-6 h-6 border-2 border-${colorTheme}-500/30 border-t-${colorTheme}-500 rounded-full animate-spin mb-2`}></div>
+                <div className={`flex flex-col items-center justify-center w-full h-full bg-${colorTheme}-500/5 p-2 overflow-hidden`}>
+                  <div className={`w-6 h-6 border-2 border-${colorTheme}-500/30 border-t-${colorTheme}-500 rounded-full animate-spin mb-2 flex-shrink-0`}></div>
                   {(() => {
-                    const progMsg = taskProgressMap?.[task.id] || '';
+                    const progMsg = taskProgressMap?.[task.id]
+                      || taskProgressMap?.[`group_${rootGroup.id}`]
+                      || rootGroup.progress_message
+                      || '';
+                    const defaultMsg = label === 'image' ? '正在生成图像...' : label === 'video' ? '正在生成视频...' : '正在视频延展...';
                     let retryBadge = null;
-                    let displayMsg = label === 'image' ? '正在生成图像...' : label === 'video' ? '正在生成视频...' : '正在视频延展...';
+                    let displayMsg = progMsg || defaultMsg;
                     if (progMsg) {
                       const retryMatch = progMsg.match(/\[重试\s(\d+\/\d+)\]/);
                       if (retryMatch) {
                         retryBadge = retryMatch[1];
+                        displayMsg = progMsg.replace(retryMatch[0], '').trim();
                       }
                     }
                     return (
-                      <div className="flex flex-col items-center">
-                        <span className={`text-[10px] text-${colorTheme}-400 font-bold animate-pulse`}>
-                          {displayMsg}
-                        </span>
+                      <div className="flex flex-col items-center min-w-0 w-full max-h-full overflow-y-auto custom-scrollbar">
                         {retryBadge && (
-                          <span className={`text-[9px] text-orange-400 font-bold mt-1 tracking-wider bg-orange-500/10 px-1 py-0.5 rounded border border-orange-500/20`}>
+                          <span className="text-[9px] text-orange-400 font-bold mb-1 tracking-wider bg-orange-500/10 px-1 py-0.5 rounded border border-orange-500/20 flex-shrink-0">
                             重试 {retryBadge}
                           </span>
                         )}
+                        <span
+                          className={`text-[10px] text-${colorTheme}-400 font-medium text-center leading-snug break-words whitespace-pre-wrap`}
+                          title={displayMsg}
+                        >
+                          {displayMsg}
+                        </span>
                       </div>
                     );
                   })()}
@@ -409,10 +453,9 @@ export default function DetailPanel({ activeJobId }) {
                 {selectedSet.has(task.id) && <Check size={14} strokeWidth={3} className="text-white" />}
               </div>
 
-              {/* 原子级操作浮层 */}
               <div className="absolute bottom-2 right-2 flex gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity z-10">
                 {task.status === 'failed' && (
-                  <button 
+                  <button
                     onClick={(e) => handleRetryTask(task.id, e)}
                     className="p-1.5 bg-indigo-500 hover:bg-indigo-600 text-white rounded-lg shadow-lg backdrop-blur-md transition-all active:scale-90"
                     title="重试此项"
@@ -420,7 +463,7 @@ export default function DetailPanel({ activeJobId }) {
                     <RefreshCw size={14} />
                   </button>
                 )}
-                <button 
+                <button
                   onClick={(e) => handleDeleteTask(task.id, e)}
                   className="p-1.5 bg-red-500/80 hover:bg-red-600 text-white rounded-lg shadow-lg backdrop-blur-md transition-all active:scale-90"
                   title="删除此项"
@@ -445,6 +488,9 @@ export default function DetailPanel({ activeJobId }) {
 
   return (
     <div className="flex-1 h-full overflow-y-auto bg-[var(--surface-0)] text-[var(--text-secondary)] custom-scrollbar relative">
+      <div className="sticky top-0 z-30 px-6 py-2 flex items-center justify-end gap-3 border-b backdrop-blur-md" style={{ borderColor: 'var(--border-subtle)', background: 'rgba(0,0,0,0.35)' }}>
+        <FolderPickerBar scopeKey="fission" label="裂变视频自动保存" />
+      </div>
       <div className="max-w-[1400px] mx-auto p-8 space-y-8 pb-32">
         <div className="border-b border-[var(--border-subtle)] pb-4">
           <h1 className="text-2xl font-black text-[var(--text-primary)]">{rootGroup.title}</h1>
@@ -453,15 +499,14 @@ export default function DetailPanel({ activeJobId }) {
           </p>
         </div>
 
-        {/* 图像层 —— 仅老形态 (text_to_image) 显示；新形态直接出视频，没有图像阶段 */}
         {!isVideoFirstFission && (
         <div className="bg-[var(--surface-2)] rounded-2xl p-5 border border-[var(--border-subtle)] shadow-xl relative">
           <div className="absolute left-0 top-0 bottom-0 w-1 bg-fuchsia-500 rounded-l-2xl"></div>
           <div className="flex justify-between items-center mb-4">
             <h2 className="text-base font-bold text-white flex items-center gap-2 cursor-pointer select-none group/title" onClick={() => toggleSection('images')}>
-              <ChevronDown 
-                size={16} 
-                className={`text-[var(--text-tertiary)] transition-transform duration-300 ${collapsedSections['images'] ? '-rotate-90' : 'rotate-0'}`} 
+              <ChevronDown
+                size={16}
+                className={`text-[var(--text-tertiary)] transition-transform duration-300 ${collapsedSections['images'] ? '-rotate-90' : 'rotate-0'}`}
               />
               <span className="bg-fuchsia-500/20 text-fuchsia-400 px-2 py-0.5 rounded text-[10px]">图像层</span>
               裂变图像 ({images.length})
@@ -520,7 +565,6 @@ export default function DetailPanel({ activeJobId }) {
         </div>
         )}
 
-        {/* Seedance 串行批处理实时日志（仅当 dreamina/seedance batch 进行中时显示） */}
         {seedanceLogLine && (
           <div className="bg-[var(--surface-2)] rounded-2xl px-4 py-3 border border-[var(--border-subtle)] shadow flex items-start gap-3">
             <Clock size={14} className="animate-[spin_3s_linear_infinite] text-cyan-400 mt-0.5 flex-shrink-0" />
@@ -531,15 +575,14 @@ export default function DetailPanel({ activeJobId }) {
           </div>
         )}
 
-        {/* 视频层 */}
         {videos.length > 0 && (
           <div className="bg-[var(--surface-2)] rounded-2xl p-5 border border-[var(--border-subtle)] shadow-xl relative">
             <div className="absolute left-0 top-0 bottom-0 w-1 bg-cyan-500 rounded-l-2xl"></div>
             <div className="flex justify-between items-center mb-4">
               <h2 className="text-base font-bold text-white flex items-center gap-2 cursor-pointer select-none group/title" onClick={() => toggleSection('videos')}>
-                <ChevronDown 
-                  size={16} 
-                  className={`text-[var(--text-tertiary)] transition-transform duration-300 ${collapsedSections['videos'] ? '-rotate-90' : 'rotate-0'}`} 
+                <ChevronDown
+                  size={16}
+                  className={`text-[var(--text-tertiary)] transition-transform duration-300 ${collapsedSections['videos'] ? '-rotate-90' : 'rotate-0'}`}
                 />
                 <span className="bg-cyan-500/20 text-cyan-400 px-2 py-0.5 rounded text-[10px]">视频层</span>
                 衍生视频 ({videos.length})
@@ -598,15 +641,14 @@ export default function DetailPanel({ activeJobId }) {
           </div>
         )}
 
-        {/* 成品层 */}
         {extends_.length > 0 && (
           <div className="bg-[var(--surface-2)] rounded-2xl p-5 border border-[var(--border-subtle)] shadow-xl relative">
             <div className="absolute left-0 top-0 bottom-0 w-1 bg-emerald-500 rounded-l-2xl"></div>
             <div className="flex justify-between items-center mb-4">
               <h2 className="text-base font-bold text-white flex items-center gap-2 cursor-pointer select-none group/title" onClick={() => toggleSection('extends')}>
-                <ChevronDown 
-                  size={16} 
-                  className={`text-[var(--text-tertiary)] transition-transform duration-300 ${collapsedSections['extends'] ? '-rotate-90' : 'rotate-0'}`} 
+                <ChevronDown
+                  size={16}
+                  className={`text-[var(--text-tertiary)] transition-transform duration-300 ${collapsedSections['extends'] ? '-rotate-90' : 'rotate-0'}`}
                 />
                 <span className="bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded text-[10px]">成品层</span>
                 延展视频 ({extends_.length})
