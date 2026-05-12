@@ -771,7 +771,7 @@ async def generate_fission_prompts(global_prompt: str, count: int, image_paths: 
     }
 
     if progress_callback:
-        await progress_callback("正在构思创意方案，注入光影与构图细节...")
+        await progress_callback("正在按模板洗稿，识别可变要素做随机替换...")
 
     _ds_client = httpx.AsyncClient(timeout=60.0)
     retries = 2
@@ -786,7 +786,7 @@ async def generate_fission_prompts(global_prompt: str, count: int, image_paths: 
             data = resp.json()
             
             if progress_callback:
-                await progress_callback(f"正在对 {count} 个裂变变体进行文本对齐与质量校验...")
+                await progress_callback(f"正在校验 {count} 条洗稿变体结构完整性...")
 
             content = data["choices"][0]["message"]["content"]
             parsed = json.loads(_extract_json_text(content))
@@ -802,7 +802,7 @@ async def generate_fission_prompts(global_prompt: str, count: int, image_paths: 
                 prompts_list = prompts_list[:count]
             
             if progress_callback:
-                await progress_callback(f"创意裂变成功！已就绪 {len(prompts_list)} 组分身指令。")
+                await progress_callback(f"洗稿完成，已生成 {len(prompts_list)} 条变体提示词。")
                 
             return prompts_list
                 

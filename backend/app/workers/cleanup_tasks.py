@@ -191,16 +191,34 @@ def mark_zombie_running_failed() -> dict:
 
     用途：worker 崩溃/重启/网络断后会留下 RUNNING/QUEUED 状态的"卡住"任务，
     它们既不出图也不报错，UI 永远显示"生成中..."。本任务定期扫一遍兜底。
+
+    例外：有 dreamina_sid 的 RUNNING 任务跳过 —— 它们正在上游排队/渲染，
+    由 dreamina_batch 的 still_queuing 续 poll 机制 + worker_ready 信号兜底。
     """
     cutoff = datetime.utcnow() - timedelta(hours=ZOMBIE_HOURS)
     db = SessionLocal()
     try:
-        zombies = db.query(Task).filter(
+        candidates = db.query(Task).filter(
             Task.status.in_([TaskStatus.RUNNING, TaskStatus.QUEUED]),
             Task.updated_at < cutoff,
         ).all()
+
+        # 过滤掉有 dreamina_sid 的 —— 它们交给 dreamina_batch 续 poll
+        zombies = []
+        skipped_dreamina = 0
+        for t in candidates:
+            cfg = t.config_json or {}
+            if cfg.get("dreamina_sid"):
+                skipped_dreamina += 1
+                continue
+            zombies.append(t)
+
         if not zombies:
-            return {"marked": 0, "cutoff": cutoff.isoformat()}
+            return {
+                "marked": 0,
+                "skipped_dreamina_sid": skipped_dreamina,
+                "cutoff": cutoff.isoformat(),
+            }
 
         msg = f"worker 长时间无响应（>{ZOMBIE_HOURS}h），系统自动标记失败。可点重试。"
         now = datetime.utcnow()
@@ -225,6 +243,7 @@ def mark_zombie_running_failed() -> dict:
 
         result = {
             "marked": len(zombies),
+            "skipped_dreamina_sid": skipped_dreamina,
             "groups_refreshed": len(group_ids),
             "cutoff": cutoff.isoformat(),
         }

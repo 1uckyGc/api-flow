@@ -417,13 +417,22 @@ async def retry_single_task(
     task.status = TaskStatus.QUEUED
     task.error_message = None
     db.commit()
-    
+
     # 回算组状态并通知 UI
     update_group_status(db, task.group_id)
-    
-    # 重新压入 Celery 队列
-    process_generation.delay(task.id)
-    
+
+    # dreamina/seedance 必须串行（dreamina 账户并发上限 ExceedConcurrencyLimit ret=1310）
+    # 重试时也得走 batch 路径，不能裸 process_generation.delay
+    group = db.query(TaskGroup).filter(TaskGroup.id == task.group_id).first()
+    group_model = (group.config_json or {}).get("model", "") if group and group.config_json else ""
+    task_model = (task.config_json or {}).get("model", "") if task.config_json else ""
+    effective_model = task_model or group_model
+    if effective_model.startswith("dreamina/seedance"):
+        from app.workers.dreamina_batch import run_dreamina_serial_batch
+        run_dreamina_serial_batch.delay(task.group_id, [task.id])
+    else:
+        process_generation.delay(task.id)
+
     await notify_ws(current_user.id, {"type": "TASK_UPDATE"})
     return {"message": "Task retried and pushed back to queue"}
 

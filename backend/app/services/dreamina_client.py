@@ -55,6 +55,27 @@ LOCAL_PATH_PATTERN = re.compile(r"(/[^\s\"',]+\.mp4)")
 LOCAL_IMAGE_PATH_PATTERN = re.compile(r"(/[^\s\"',]+\.(?:png|jpg|jpeg|webp))", re.IGNORECASE)
 
 
+def _estimate_eta(queue_history: list) -> Optional[int]:
+    """基于 (ts, queue_idx) 历史点估算剩余秒数。
+    - 历史 < 2 点：None（信息不足）
+    - 队列没动 / 在上升：None（不可估算）
+    - 否则：剩余 = current_idx / (消化速率 个/秒)
+    """
+    if not queue_history or len(queue_history) < 2:
+        return None
+    # 用最早 vs 最新两个点的差算速率
+    t0, q0 = queue_history[0]
+    tN, qN = queue_history[-1]
+    dt = tN - t0
+    dq = q0 - qN   # 队列下降为正
+    if dt <= 0 or dq <= 0:
+        return None
+    rate_per_sec = dq / dt
+    if rate_per_sec <= 0:
+        return None
+    return int(qN / rate_per_sec)
+
+
 def _run(args: list[str], timeout: int = 120) -> tuple[int, str, str]:
     """运行 dreamina 子命令，返回 (returncode, stdout, stderr)。stderr 合并到 stdout。"""
     cmd = [DREAMINA_BIN, *args]
@@ -248,55 +269,151 @@ class DreaminaClient:
     def image2video(
         self,
         *,
-        image_path: str,
-        prompt: str,
+        image_path: Optional[str] = None,
+        prompt: Optional[str] = None,
         model_version: str = "seedance2.0fast",
         duration: int = 15,
         video_resolution: str = "720p",
         download_dir: Optional[str] = None,
-        max_wait_sec: int = 1800,    # 20 min — seedance2.0fast 高峰时排队 5-15 min 是常态
+        max_wait_sec: int = 1800,    # 30 min — seedance2.0fast 高峰时排队 5-15 min 是常态
         poll_interval: int = 15,     # 队列长就别太勤快，省得撞速率限制
         progress_callback: Optional[Callable[[dict], None]] = None,
+        sid_persist_callback: Optional[Callable[[str], None]] = None,
+        resume_sid: Optional[str] = None,
     ) -> DreaminaResult:
-        """submit + 自动轮询 + 自动下载到本地 mp4。"""
-        if not os.path.exists(self.bin):
-            return DreaminaResult(success=False, fail_reason=f"dreamina binary missing: {self.bin}")
-        if not os.path.exists(image_path):
-            return DreaminaResult(success=False, fail_reason=f"image not found: {image_path}")
+        """submit + 自动轮询 + 自动下载到本地 mp4。
+        外层 wrap: 全局 dreamina concurrency semaphore（Redis），抢不到槽就阻塞排队。
+        in-flight 占着整段 submit→poll→download，完成后释放。
 
-        # 1) submit
-        rc, out, _ = _run([
-            "image2video",
-            f"--image={image_path}",
-            f"--prompt={prompt}",
-            f"--duration={int(max(4, min(15, duration)))}",
-            f"--video_resolution={video_resolution}",
-            f"--model_version={model_version}",
-            "--poll=0",
-        ], timeout=300)
+        resume_sid: 续 poll 模式 —— 跳过 submit，直接用已有 sid 进入 poll 循环
+        （worker 重启时恢复 zombie task 用）。image_path / prompt 可省略。
+        """
+        from app.utils.dreamina_concurrency import wait_for_slot, release_slot
 
-        # 优先看 gen_status — 如果是 fail，直接拿 fail_reason 报上去（不要纠结 submit_id 为空）
-        gs = _extract_gen_status(out)
-        fail_reason = _extract_fail_reason(out)
-        if gs == "fail":
-            return DreaminaResult(
-                success=False, gen_status=gs,
-                fail_reason=fail_reason or "Dreamina submit 返回 gen_status=fail（无 fail_reason）",
-                raw_stdout_tail=out[-400:].strip(),
-            )
-
-        sid = _extract_submit_id(out)
-        if not sid:
-            tail = out[-400:].strip()
-            # gen_status 不是 fail 但又没 submit_id —— 报告上行的 fail_reason 或原始尾部
-            msg = fail_reason or f"submit 未返回 submit_id (rc={rc}, gen_status={gs})"
+        # 抢槽（阻塞直到拿到或超时）。waiting 期间前端轮询能看到 waiting 数+1
+        if progress_callback:
+            try:
+                progress_callback({
+                    "gen_status": "queuing",
+                    "queue_idx": None,
+                    "fail_reason": "等待 Dreamina 并发槽（账户并发上限）",
+                    "elapsed_sec": 0,
+                    "submit_id": None,
+                })
+            except Exception:
+                pass
+        if not wait_for_slot(timeout_sec=max_wait_sec, poll=3.0):
             return DreaminaResult(
                 success=False,
-                fail_reason=f"{msg}. tail: {tail}",
-                raw_stdout_tail=tail,
+                fail_reason=f"等待 Dreamina 并发槽超时（{max_wait_sec}s）；账户并发被打满太久。",
             )
 
-        # 提交成功立即推一次进度（不等 60s）
+        try:
+            return self._image2video_inner(
+                image_path=image_path, prompt=prompt,
+                model_version=model_version, duration=duration,
+                video_resolution=video_resolution, download_dir=download_dir,
+                max_wait_sec=max_wait_sec, poll_interval=poll_interval,
+                progress_callback=progress_callback,
+                sid_persist_callback=sid_persist_callback,
+                resume_sid=resume_sid,
+            )
+        finally:
+            release_slot()
+
+    def _image2video_inner(
+        self,
+        *,
+        image_path: Optional[str],
+        prompt: Optional[str],
+        model_version: str,
+        duration: int,
+        video_resolution: str,
+        download_dir: Optional[str],
+        max_wait_sec: int,
+        poll_interval: int,
+        progress_callback: Optional[Callable[[dict], None]],
+        sid_persist_callback: Optional[Callable[[str], None]] = None,
+        resume_sid: Optional[str] = None,
+    ) -> DreaminaResult:
+        """原 image2video 主体（submit + poll + download），不管 concurrency 槽。
+        resume_sid 非空时跳过 submit，直接用已有 sid 进 poll。
+        """
+        if not os.path.exists(self.bin):
+            return DreaminaResult(success=False, fail_reason=f"dreamina binary missing: {self.bin}")
+        if not resume_sid:
+            if not image_path or not os.path.exists(image_path):
+                return DreaminaResult(success=False, fail_reason=f"image not found: {image_path}")
+
+        if resume_sid:
+            # 续 poll 模式：跳过 submit，直接用已有 sid
+            sid = resume_sid
+            logger.info(f"dreamina image2video resume mode: sid={sid[:18]}")
+            out = ""  # 留给后面 raw_stdout_tail 用
+        else:
+            # 1) submit —— ExceedConcurrencyLimit (ret=1310) 是瞬态错误（账户级并发暂时打满），
+            # 等几秒前面任务释放后通常就能进。最多重试 7 次，每次间隔 45s（总扛 ~5.25min）。
+            submit_cmd = [
+                "image2video",
+                f"--image={image_path}",
+                f"--prompt={prompt}",
+                f"--duration={int(max(4, min(15, duration)))}",
+                f"--video_resolution={video_resolution}",
+                f"--model_version={model_version}",
+                "--poll=0",
+            ]
+            SUBMIT_RETRY_BACKOFF = 45  # 秒
+            SUBMIT_MAX_TRIES = 8       # 首次 + 7 次重试
+            for attempt in range(SUBMIT_MAX_TRIES):
+                rc, out, _ = _run(submit_cmd, timeout=300)
+                gs = _extract_gen_status(out)
+                fail_reason = _extract_fail_reason(out)
+                is_concurrency = bool(fail_reason and "ExceedConcurrencyLimit" in fail_reason) or "ret=1310" in (out or "")
+                if not is_concurrency:
+                    break  # 不是并发问题，按原路径走
+                if attempt == SUBMIT_MAX_TRIES - 1:
+                    logger.warning(f"dreamina submit hit ExceedConcurrencyLimit, exhausted {SUBMIT_MAX_TRIES} tries; giving up")
+                    break
+                logger.info(f"dreamina submit hit ExceedConcurrencyLimit (try {attempt+1}/{SUBMIT_MAX_TRIES}), wait {SUBMIT_RETRY_BACKOFF}s then retry")
+                # 让 caller 看见我们在等并发槽
+                if progress_callback:
+                    try:
+                        progress_callback({
+                            "gen_status": "queuing",
+                            "queue_idx": None,
+                            "fail_reason": f"账户并发上限暂满，等 {SUBMIT_RETRY_BACKOFF}s 重试 ({attempt+1}/{SUBMIT_MAX_TRIES})",
+                            "elapsed_sec": 0,
+                            "submit_id": None,
+                        })
+                    except Exception:
+                        pass
+                time.sleep(SUBMIT_RETRY_BACKOFF)
+
+            if gs == "fail":
+                return DreaminaResult(
+                    success=False, gen_status=gs,
+                    fail_reason=fail_reason or "Dreamina submit 返回 gen_status=fail（无 fail_reason）",
+                    raw_stdout_tail=out[-400:].strip(),
+                )
+
+            sid = _extract_submit_id(out)
+            if not sid:
+                tail = out[-400:].strip()
+                msg = fail_reason or f"submit 未返回 submit_id (rc={rc}, gen_status={gs})"
+                return DreaminaResult(
+                    success=False,
+                    fail_reason=f"{msg}. tail: {tail}",
+                    raw_stdout_tail=tail,
+                )
+
+            # 立即同步持久化 sid 到 DB — 闭合 worker 崩溃前 60s callback 节流的竞争窗口
+            if sid_persist_callback:
+                try:
+                    sid_persist_callback(sid)
+                except Exception as e:
+                    logger.warning(f"image2video sid_persist_callback raised: {e}")
+
+        # 提交成功（或 resume）立即推一次进度（不等 60s）
         def _safe_cb(info: dict) -> None:
             if not progress_callback:
                 return
@@ -324,6 +441,8 @@ class DreaminaClient:
         last_queue_idx = None
         last_cb_ts = time.monotonic()
         CB_INTERVAL = 60.0  # 每 60s 节流一次回调
+        # ETA 估算用：(monotonic_ts, queue_idx) 历史，cap 10 条
+        queue_history: list[tuple[float, int]] = []
         while time.monotonic() < deadline:
             polls += 1
             time.sleep(poll_interval)
@@ -338,14 +457,20 @@ class DreaminaClient:
             if qi is not None and last_queue_idx != qi:
                 logger.info(f"dreamina poll #{polls} sid={sid[:8]} status={gs} queue_idx={qi}")
                 last_queue_idx = qi
+                queue_history.append((time.monotonic(), qi))
+                if len(queue_history) > 10:
+                    queue_history = queue_history[-10:]
             now = time.monotonic()
             if progress_callback and (now - last_cb_ts) >= CB_INTERVAL:
+                # ETA 估算：基于 queue_history 算消化速率
+                eta_sec = _estimate_eta(queue_history)
                 _safe_cb({
                     "gen_status": gs,
                     "queue_idx": qi if qi is not None else last_queue_idx,
                     "fail_reason": _extract_fail_reason(out2),
                     "elapsed_sec": int(now - start_ts),
                     "submit_id": sid,
+                    "eta_sec": eta_sec,
                 })
                 last_cb_ts = now
             if gs == "success":
@@ -378,9 +503,285 @@ class DreaminaClient:
                 )
             # querying / 其他状态 → 继续
 
+        # poll 预算用完但上游仍在排队/渲染 —— 不算失败，让 batch 层续 poll
+        last_status = _extract_gen_status(last_out) or "querying"
+        logger.info(
+            f"image2video poll budget {max_wait_sec}s used up but upstream still {last_status}, "
+            f"sid={sid[:8]} persisted, awaiting batch-level resume"
+        )
         return DreaminaResult(
-            success=False, submit_id=sid, gen_status="timeout",
-            fail_reason=f"polling timed out after {max_wait_sec}s ({polls} polls); last status={_extract_gen_status(last_out)}",
+            success=False, submit_id=sid, gen_status="still_queuing",
+            fail_reason=(
+                f"poll 预算 {max_wait_sec}s 已用完 ({polls} polls)，上游仍在 {last_status}；"
+                f"sid={sid[:8]} 已持久化，等待续 poll"
+            ),
+            raw_stdout_tail=last_out[-400:].strip(),
+            poll_count=polls,
+        )
+
+
+    # ---------- multimodal2video (全能参考 / formerly ref2video) ----------
+    def multimodal2video(
+        self,
+        *,
+        image_paths: Optional[list] = None,
+        prompt: Optional[str] = None,
+        ratio: str = "9:16",
+        model_version: str = "seedance2.0fast",
+        duration: int = 15,
+        video_resolution: str = "720p",
+        download_dir: Optional[str] = None,
+        max_wait_sec: int = 1800,
+        poll_interval: int = 15,
+        progress_callback: Optional[Callable[[dict], None]] = None,
+        sid_persist_callback: Optional[Callable[[str], None]] = None,
+        resume_sid: Optional[str] = None,
+    ) -> DreaminaResult:
+        """Dreamina 旗舰"全能参考"视频生成。
+        多图/视频/音频作参考，dreamina 自由生成视频。
+        当前仅暴露 image_paths（最多 9 张）；未来可扩展 video/audio。
+        ratio 必填：1:1 / 3:4 / 16:9 / 4:3 / 9:16 / 21:9。
+        外层 wrap: 全局 dreamina concurrency semaphore（与 image2video 共用）。
+        """
+        from app.utils.dreamina_concurrency import wait_for_slot, release_slot
+
+        if progress_callback:
+            try:
+                progress_callback({
+                    "gen_status": "queuing",
+                    "queue_idx": None,
+                    "fail_reason": "等待 Dreamina 并发槽（账户并发上限）",
+                    "elapsed_sec": 0,
+                    "submit_id": None,
+                })
+            except Exception:
+                pass
+        if not wait_for_slot(timeout_sec=max_wait_sec, poll=3.0):
+            return DreaminaResult(
+                success=False,
+                fail_reason=f"等待 Dreamina 并发槽超时（{max_wait_sec}s）；账户并发被打满太久。",
+            )
+
+        try:
+            return self._multimodal2video_inner(
+                image_paths=image_paths, prompt=prompt,
+                ratio=ratio, model_version=model_version,
+                duration=duration, video_resolution=video_resolution,
+                download_dir=download_dir,
+                max_wait_sec=max_wait_sec, poll_interval=poll_interval,
+                progress_callback=progress_callback,
+                sid_persist_callback=sid_persist_callback,
+                resume_sid=resume_sid,
+            )
+        finally:
+            release_slot()
+
+    def _multimodal2video_inner(
+        self,
+        *,
+        image_paths: Optional[list],
+        prompt: Optional[str],
+        ratio: str,
+        model_version: str,
+        duration: int,
+        video_resolution: str,
+        download_dir: Optional[str],
+        max_wait_sec: int,
+        poll_interval: int,
+        progress_callback: Optional[Callable[[dict], None]],
+        sid_persist_callback: Optional[Callable[[str], None]] = None,
+        resume_sid: Optional[str] = None,
+    ) -> DreaminaResult:
+        """multimodal2video 主体（submit + poll + download），不管 concurrency 槽。
+        resume_sid 非空时跳过 submit，直接 poll。
+        """
+        if not os.path.exists(self.bin):
+            return DreaminaResult(success=False, fail_reason=f"dreamina binary missing: {self.bin}")
+
+        if resume_sid:
+            sid = resume_sid
+            logger.info(f"dreamina multimodal2video resume mode: sid={sid[:18]}")
+            out = ""
+        else:
+            if not image_paths:
+                return DreaminaResult(success=False, fail_reason="multimodal2video 至少需 1 张图")
+            for p in image_paths:
+                if not os.path.exists(p):
+                    return DreaminaResult(success=False, fail_reason=f"image not found: {p}")
+
+            # 构造 submit 命令：multimodal2video --image=<repeat> --ratio=... --prompt=...
+            submit_cmd = ["multimodal2video"]
+            for p in image_paths:
+                submit_cmd.append(f"--image={p}")
+            if prompt:
+                submit_cmd.append(f"--prompt={prompt}")
+            submit_cmd.extend([
+                f"--ratio={ratio}",
+                f"--duration={int(max(4, min(15, duration)))}",
+                f"--video_resolution={video_resolution}",
+                f"--model_version={model_version}",
+                "--poll=0",
+            ])
+
+            SUBMIT_RETRY_BACKOFF = 45
+            SUBMIT_MAX_TRIES = 8
+            gs = None
+            fail_reason = None
+            rc, out = 0, ""
+            for attempt in range(SUBMIT_MAX_TRIES):
+                rc, out, _ = _run(submit_cmd, timeout=300)
+                gs = _extract_gen_status(out)
+                fail_reason = _extract_fail_reason(out)
+                is_concurrency = bool(fail_reason and "ExceedConcurrencyLimit" in fail_reason) or "ret=1310" in (out or "")
+                if not is_concurrency:
+                    break
+                if attempt == SUBMIT_MAX_TRIES - 1:
+                    logger.warning(f"multimodal2video submit hit ExceedConcurrencyLimit, exhausted {SUBMIT_MAX_TRIES} tries; giving up")
+                    break
+                logger.info(f"multimodal2video submit hit ExceedConcurrencyLimit (try {attempt+1}/{SUBMIT_MAX_TRIES}), wait {SUBMIT_RETRY_BACKOFF}s")
+                if progress_callback:
+                    try:
+                        progress_callback({
+                            "gen_status": "queuing",
+                            "queue_idx": None,
+                            "fail_reason": f"账户并发上限暂满，等 {SUBMIT_RETRY_BACKOFF}s 重试 ({attempt+1}/{SUBMIT_MAX_TRIES})",
+                            "elapsed_sec": 0,
+                            "submit_id": None,
+                        })
+                    except Exception:
+                        pass
+                time.sleep(SUBMIT_RETRY_BACKOFF)
+
+            # 识别 AigcComplianceConfirmationRequired —— Dreamina Web 端首次授权
+            if fail_reason and "AigcComplianceConfirmationRequired" in fail_reason:
+                return DreaminaResult(
+                    success=False, gen_status=gs,
+                    fail_reason="multimodal2video 首次使用需 Dreamina Web 端授权确认。请登录 jimeng.jianying.com 完成授权后重试。",
+                    raw_stdout_tail=out[-400:].strip(),
+                )
+
+            if gs == "fail":
+                return DreaminaResult(
+                    success=False, gen_status=gs,
+                    fail_reason=fail_reason or "multimodal2video submit 返回 gen_status=fail",
+                    raw_stdout_tail=out[-400:].strip(),
+                )
+
+            sid = _extract_submit_id(out)
+            if not sid:
+                tail = out[-400:].strip()
+                msg = fail_reason or f"submit 未返回 submit_id (rc={rc}, gen_status={gs})"
+                return DreaminaResult(
+                    success=False,
+                    fail_reason=f"{msg}. tail: {tail}",
+                    raw_stdout_tail=tail,
+                )
+
+            # 立即同步持久化 sid 到 DB — 闭合 worker 崩溃前 60s callback 节流的竞争窗口
+            if sid_persist_callback:
+                try:
+                    sid_persist_callback(sid)
+                except Exception as e:
+                    logger.warning(f"multimodal2video sid_persist_callback raised: {e}")
+
+        # 内部 _safe_cb + 初始 submitted 推送
+        def _safe_cb(info: dict) -> None:
+            if not progress_callback:
+                return
+            try:
+                progress_callback(info)
+            except Exception as e:
+                logger.warning(f"multimodal2video progress_callback raised: {e}")
+
+        start_ts = time.monotonic()
+        _safe_cb({
+            "gen_status": "submitted",
+            "queue_idx": None,
+            "fail_reason": None,
+            "elapsed_sec": 0,
+            "submit_id": sid,
+        })
+
+        # poll + download —— 复用 image2video 完全一致的逻辑
+        ddir = Path(download_dir) if download_dir else Path("outputs") / "dreamina"
+        ddir.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + max_wait_sec
+        polls = 0
+        last_out = out
+        last_queue_idx = None
+        last_cb_ts = time.monotonic()
+        CB_INTERVAL = 60.0
+        queue_history: list[tuple[float, int]] = []
+        while time.monotonic() < deadline:
+            polls += 1
+            time.sleep(poll_interval)
+            rc2, out2, _ = _run([
+                "query_result",
+                f"--submit_id={sid}",
+            ], timeout=60)
+            last_out = out2
+            gs = _extract_gen_status(out2)
+            qm = QUEUE_IDX_PATTERN.search(out2)
+            qi = int(qm.group(1)) if qm else None
+            if qi is not None and last_queue_idx != qi:
+                logger.info(f"multimodal2video poll #{polls} sid={sid[:8]} status={gs} queue_idx={qi}")
+                last_queue_idx = qi
+                queue_history.append((time.monotonic(), qi))
+                if len(queue_history) > 10:
+                    queue_history = queue_history[-10:]
+            now = time.monotonic()
+            if progress_callback and (now - last_cb_ts) >= CB_INTERVAL:
+                eta_sec = _estimate_eta(queue_history)
+                _safe_cb({
+                    "gen_status": gs,
+                    "queue_idx": qi if qi is not None else last_queue_idx,
+                    "fail_reason": _extract_fail_reason(out2),
+                    "elapsed_sec": int(now - start_ts),
+                    "submit_id": sid,
+                    "eta_sec": eta_sec,
+                })
+                last_cb_ts = now
+            if gs == "success":
+                rc3, out3, _ = _run([
+                    "query_result",
+                    f"--submit_id={sid}",
+                    f"--download_dir={ddir}",
+                ], timeout=180)
+                local = _extract_local_video_path(out3, ddir)
+                if not local:
+                    return DreaminaResult(
+                        success=False, submit_id=sid, gen_status=gs,
+                        fail_reason=f"success but couldn't locate downloaded mp4 (rc={rc3}); tail: {out3[-300:].strip()}",
+                        raw_stdout_tail=out3[-400:].strip(),
+                        poll_count=polls,
+                    )
+                return DreaminaResult(
+                    success=True, submit_id=sid, gen_status=gs,
+                    local_video_path=local,
+                    raw_stdout_tail=out3[-400:].strip(),
+                    poll_count=polls,
+                )
+            if gs == "fail":
+                return DreaminaResult(
+                    success=False, submit_id=sid, gen_status=gs,
+                    fail_reason=_extract_fail_reason(out2) or "gen_status=fail",
+                    raw_stdout_tail=out2[-400:].strip(),
+                    poll_count=polls,
+                )
+            # querying / 其他 → 继续
+
+        # poll 预算用完但上游仍在排队/渲染 —— 不算失败，让 batch 层续 poll
+        last_status = _extract_gen_status(last_out) or "querying"
+        logger.info(
+            f"multimodal2video poll budget {max_wait_sec}s used up but upstream still {last_status}, "
+            f"sid={sid[:8]} persisted, awaiting batch-level resume"
+        )
+        return DreaminaResult(
+            success=False, submit_id=sid, gen_status="still_queuing",
+            fail_reason=(
+                f"poll 预算 {max_wait_sec}s 已用完 ({polls} polls)，上游仍在 {last_status}；"
+                f"sid={sid[:8]} 已持久化，等待续 poll"
+            ),
             raw_stdout_tail=last_out[-400:].strip(),
             poll_count=polls,
         )

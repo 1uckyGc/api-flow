@@ -345,11 +345,15 @@ async def _run_dreamina(
             result.error = dr.fail_reason or "dreamina text2video 失败"
         return result
 
-    # seedance2.0 / seedance2.0fast / *_vip → image2video
+    # seedance2.0 / seedance2.0fast / *_vip → image2video（i2v 首帧）
+    # seedance2.0...-omniref → multimodal2video（全能参考）
+    is_omniref = raw.endswith("-omniref")
+    real_model_version = raw[:-len("-omniref")] if is_omniref else raw
+
     img = (image_paths or [None])[0]
     if not img:
         result.success = False
-        result.error = "seedance i2v 需要输入图"
+        result.error = "seedance 需要输入图"
         return result
     if not os.path.isabs(img):
         img = str(Path("/app") / img)
@@ -361,22 +365,37 @@ async def _run_dreamina(
     duration = int(config_json.get("seconds") or config_json.get("duration") or 15)
     video_resolution = config_json.get("video_resolution") or "720p"
     # 非 VIP 不支持 1080p，guard
-    if video_resolution != "720p" and "vip" not in raw:
-        logger.info(f"dreamina i2v: forcing video_resolution {video_resolution} → 720p (model {raw} not vip)")
+    if video_resolution != "720p" and "vip" not in real_model_version:
+        logger.info(f"dreamina seedance: forcing video_resolution {video_resolution} → 720p (model {real_model_version} not vip)")
         video_resolution = "720p"
 
-    dr = await asyncio.to_thread(
-        client.image2video,
-        image_path=img,
-        prompt=prompt,
-        model_version=raw,
-        duration=duration,
-        video_resolution=video_resolution,
-    )
+    if is_omniref:
+        aspect = config_json.get("aspect_ratio") or config_json.get("aspectRatio") or "9:16"
+        dr = await asyncio.to_thread(
+            client.multimodal2video,
+            image_paths=[img],
+            prompt=prompt,
+            ratio=aspect,
+            model_version=real_model_version,
+            duration=duration,
+            video_resolution=video_resolution,
+        )
+        op_label = "multimodal2video"
+    else:
+        dr = await asyncio.to_thread(
+            client.image2video,
+            image_path=img,
+            prompt=prompt,
+            model_version=real_model_version,
+            duration=duration,
+            video_resolution=video_resolution,
+        )
+        op_label = "image2video"
+
     if dr.success:
         result.success = True
         result.output_file_path = dr.local_video_path or ""
     else:
         result.success = False
-        result.error = dr.fail_reason or "dreamina image2video 失败"
+        result.error = dr.fail_reason or f"dreamina {op_label} 失败"
     return result
