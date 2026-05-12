@@ -26,7 +26,121 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
+import httpx
+
 from app.utils.logger import logger
+
+
+def _parse_query_result_json(text: str) -> Optional[dict]:
+    """dreamina CLI stdout 混了 SQL 慢查询 ANSI 日志和真正的 JSON 输出。
+    定位以 `{\\n  "submit_id"` 开头的真正 JSON 块，去除前后噪声后解析。
+    失败返 None。
+    """
+    if not text:
+        return None
+    # marker：dreamina CLI 真正的 JSON 输出第一行总是 `{` + 换行 + `  "submit_id"`
+    idx = text.find('{\n  "submit_id"')
+    if idx == -1:
+        # 兜底：第一个 `{\n` 开头
+        idx = text.find('{\n')
+        if idx == -1:
+            return None
+    snippet = text[idx:]
+    # JSON 结束后可能还有零星日志；scan 出 balanced 顶层对象的结束位置
+    depth = 0
+    in_str = False
+    esc = False
+    end = -1
+    for i, ch in enumerate(snippet):
+        if esc:
+            esc = False
+            continue
+        if ch == '\\' and in_str:
+            esc = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    if end == -1:
+        return None
+    try:
+        return json.loads(snippet[:end])
+    except Exception:
+        return None
+
+
+def _extract_video_url_from_query(text: str) -> Optional[str]:
+    """从 query_result 输出 JSON 抽 result_json.videos[0].video_url（已签名的 CDN 直链）。
+
+    实测：dreamina CLI 自带下载 ~25s/11MB（~460KB/s），而直链 httpx 流式下载 ~2s/11MB
+    （~5.7MB/s），12x 提速。优先用直链，失败 fallback 老 CLI 下载。
+    """
+    data = _parse_query_result_json(text)
+    if not data:
+        return None
+    try:
+        vids = (data.get("result_json") or {}).get("videos") or []
+        if not vids:
+            return None
+        url = vids[0].get("video_url")
+        return url if isinstance(url, str) and url.startswith("http") else None
+    except Exception:
+        return None
+
+
+def _extract_image_urls_from_query(text: str) -> list:
+    """从 query_result 输出 JSON 抽 result_json.images[].image_url（t2i/i2i 用）。"""
+    data = _parse_query_result_json(text)
+    if not data:
+        return []
+    try:
+        imgs = (data.get("result_json") or {}).get("images") or []
+        return [im.get("image_url") for im in imgs if isinstance(im.get("image_url"), str) and im.get("image_url", "").startswith("http")]
+    except Exception:
+        return []
+
+
+def _direct_download_video(url: str, ddir: Path, sid: str, suffix: str = "_video_1") -> Optional[str]:
+    """直接用 httpx 流式下载 dreamina 已签名的 CDN URL 到 ddir/<sid><suffix>.mp4。
+    比 dreamina CLI 自带下载快约 12x（实测 11MB 25s → 2s）。
+    """
+    ddir.mkdir(parents=True, exist_ok=True)
+    dst = ddir / f"{sid}{suffix}.mp4"
+    try:
+        t0 = time.monotonic()
+        with httpx.Client(timeout=120.0, follow_redirects=True) as cli:
+            with cli.stream("GET", url) as resp:
+                if resp.status_code != 200:
+                    logger.warning(
+                        f"dreamina direct download HTTP {resp.status_code} for sid={sid[:8]}; "
+                        f"will fall back to CLI"
+                    )
+                    return None
+                with dst.open("wb") as f:
+                    for chunk in resp.iter_bytes(chunk_size=64 * 1024):
+                        f.write(chunk)
+        elapsed = time.monotonic() - t0
+        size_mb = dst.stat().st_size / 1024 / 1024
+        logger.info(
+            f"dreamina direct download sid={sid[:8]} {size_mb:.1f}MB in {elapsed:.1f}s "
+            f"({size_mb/elapsed:.1f}MB/s) → {dst}"
+        )
+        return str(dst).replace("\\", "/")
+    except Exception as e:
+        logger.warning(f"dreamina direct download failed for sid={sid[:8]}: {e}; will fall back to CLI")
+        if dst.exists():
+            try: dst.unlink()
+            except Exception: pass
+        return None
 
 
 DREAMINA_BIN = os.environ.get("DREAMINA_BIN", "/root/.local/bin/dreamina")
@@ -190,6 +304,7 @@ def _submit_poll_download(
     polls = 0
     last_out = out
     last_queue_idx = None
+    last_gs = None
     while time.monotonic() < deadline:
         polls += 1
         time.sleep(poll_interval)
@@ -197,36 +312,49 @@ def _submit_poll_download(
         last_out = out2
         gs = _extract_gen_status(out2)
         qm = QUEUE_IDX_PATTERN.search(out2)
-        if qm:
-            qi = int(qm.group(1))
-            if last_queue_idx != qi:
-                logger.info(f"dreamina poll #{polls} sid={sid[:8]} status={gs} queue_idx={qi}")
+        qi = int(qm.group(1)) if qm else None
+        if gs != last_gs or (qi is not None and last_queue_idx != qi):
+            logger.info(f"dreamina poll #{polls} sid={sid[:8]} status={gs} queue_idx={qi}")
+            last_gs = gs
+            if qi is not None:
                 last_queue_idx = qi
         if gs == "success":
-            # 3) 触发下载
-            rc3, out3, _ = _run([
-                "query_result",
-                f"--submit_id={sid}",
-                f"--download_dir={ddir}",
-            ], timeout=download_timeout)
-            if download_kind == "image":
-                local = _extract_local_image_path(out3, ddir)
-                kind_label = "image"
-            else:
-                local = _extract_local_video_path(out3, ddir)
-                kind_label = "mp4"
+            local = None
+            raw_tail = ""
+            # 视频优先尝试直链下载（12x faster）；图片暂未实现（CLI 下载图片相对快）
+            if download_kind == "video":
+                video_url = _extract_video_url_from_query(out2)
+                if video_url:
+                    local = _direct_download_video(video_url, ddir, sid)
+                    if local:
+                        raw_tail = out2[-400:].strip()
             if not local:
-                return DreaminaResult(
-                    success=False, submit_id=sid, gen_status=gs,
-                    fail_reason=f"success but couldn't locate downloaded {kind_label} (rc={rc3}); tail: {out3[-300:].strip()}",
-                    raw_stdout_tail=out3[-400:].strip(),
-                    poll_count=polls,
-                )
+                if download_kind == "video":
+                    logger.info(f"dreamina {download_dir_subpath} sid={sid[:8]} fallback to CLI download")
+                rc3, out3, _ = _run([
+                    "query_result",
+                    f"--submit_id={sid}",
+                    f"--download_dir={ddir}",
+                ], timeout=download_timeout)
+                if download_kind == "image":
+                    local = _extract_local_image_path(out3, ddir)
+                    kind_label = "image"
+                else:
+                    local = _extract_local_video_path(out3, ddir)
+                    kind_label = "mp4"
+                raw_tail = out3[-400:].strip()
+                if not local:
+                    return DreaminaResult(
+                        success=False, submit_id=sid, gen_status=gs,
+                        fail_reason=f"success but couldn't locate downloaded {kind_label} (rc={rc3}); tail: {out3[-300:].strip()}",
+                        raw_stdout_tail=raw_tail,
+                        poll_count=polls,
+                    )
             return DreaminaResult(
                 success=True, submit_id=sid, gen_status=gs,
                 local_video_path=local if download_kind == "video" else None,
                 local_image_path=local if download_kind == "image" else None,
-                raw_stdout_tail=out3[-400:].strip(),
+                raw_stdout_tail=raw_tail,
                 poll_count=polls,
             )
         if gs == "fail":
@@ -439,6 +567,7 @@ class DreaminaClient:
         polls = 0
         last_out = out
         last_queue_idx = None
+        last_gs = None
         last_cb_ts = time.monotonic()
         CB_INTERVAL = 60.0  # 每 60s 节流一次回调
         # ETA 估算用：(monotonic_ts, queue_idx) 历史，cap 10 条
@@ -454,12 +583,16 @@ class DreaminaClient:
             gs = _extract_gen_status(out2)
             qm = QUEUE_IDX_PATTERN.search(out2)
             qi = int(qm.group(1)) if qm else None
-            if qi is not None and last_queue_idx != qi:
+            # 状态变化（gs 或 queue_idx）都打 log —— 之前只看 queue_idx 变化，
+            # queue=0 → success 转换完全沉默，无观测性
+            if gs != last_gs or (qi is not None and last_queue_idx != qi):
                 logger.info(f"dreamina poll #{polls} sid={sid[:8]} status={gs} queue_idx={qi}")
-                last_queue_idx = qi
-                queue_history.append((time.monotonic(), qi))
-                if len(queue_history) > 10:
-                    queue_history = queue_history[-10:]
+                last_gs = gs
+                if qi is not None and last_queue_idx != qi:
+                    last_queue_idx = qi
+                    queue_history.append((time.monotonic(), qi))
+                    if len(queue_history) > 10:
+                        queue_history = queue_history[-10:]
             now = time.monotonic()
             if progress_callback and (now - last_cb_ts) >= CB_INTERVAL:
                 # ETA 估算：基于 queue_history 算消化速率
@@ -474,24 +607,34 @@ class DreaminaClient:
                 })
                 last_cb_ts = now
             if gs == "success":
-                # 3) 触发下载
-                rc3, out3, _ = _run([
-                    "query_result",
-                    f"--submit_id={sid}",
-                    f"--download_dir={ddir}",
-                ], timeout=180)
-                local = _extract_local_video_path(out3, ddir)
+                # 优先尝试直链下载（实测 12x 提速：CLI 25s → httpx 2s）
+                video_url = _extract_video_url_from_query(out2)
+                local = None
+                if video_url:
+                    local = _direct_download_video(video_url, ddir, sid)
+                # fallback: CLI 自带下载（兼容 video_url 解析失败 / 直链 403 等）
                 if not local:
-                    return DreaminaResult(
-                        success=False, submit_id=sid, gen_status=gs,
-                        fail_reason=f"success but couldn't locate downloaded mp4 (rc={rc3}); tail: {out3[-300:].strip()}",
-                        raw_stdout_tail=out3[-400:].strip(),
-                        poll_count=polls,
-                    )
+                    logger.info(f"dreamina image2video sid={sid[:8]} fallback to CLI download")
+                    rc3, out3, _ = _run([
+                        "query_result",
+                        f"--submit_id={sid}",
+                        f"--download_dir={ddir}",
+                    ], timeout=180)
+                    local = _extract_local_video_path(out3, ddir)
+                    raw_tail = out3[-400:].strip()
+                    if not local:
+                        return DreaminaResult(
+                            success=False, submit_id=sid, gen_status=gs,
+                            fail_reason=f"success but couldn't locate downloaded mp4 (rc={rc3}); tail: {out3[-300:].strip()}",
+                            raw_stdout_tail=raw_tail,
+                            poll_count=polls,
+                        )
+                else:
+                    raw_tail = out2[-400:].strip()
                 return DreaminaResult(
                     success=True, submit_id=sid, gen_status=gs,
                     local_video_path=local,
-                    raw_stdout_tail=out3[-400:].strip(),
+                    raw_stdout_tail=raw_tail,
                     poll_count=polls,
                 )
             if gs == "fail":
@@ -709,6 +852,7 @@ class DreaminaClient:
         polls = 0
         last_out = out
         last_queue_idx = None
+        last_gs = None
         last_cb_ts = time.monotonic()
         CB_INTERVAL = 60.0
         queue_history: list[tuple[float, int]] = []
@@ -723,12 +867,14 @@ class DreaminaClient:
             gs = _extract_gen_status(out2)
             qm = QUEUE_IDX_PATTERN.search(out2)
             qi = int(qm.group(1)) if qm else None
-            if qi is not None and last_queue_idx != qi:
+            if gs != last_gs or (qi is not None and last_queue_idx != qi):
                 logger.info(f"multimodal2video poll #{polls} sid={sid[:8]} status={gs} queue_idx={qi}")
-                last_queue_idx = qi
-                queue_history.append((time.monotonic(), qi))
-                if len(queue_history) > 10:
-                    queue_history = queue_history[-10:]
+                last_gs = gs
+                if qi is not None and last_queue_idx != qi:
+                    last_queue_idx = qi
+                    queue_history.append((time.monotonic(), qi))
+                    if len(queue_history) > 10:
+                        queue_history = queue_history[-10:]
             now = time.monotonic()
             if progress_callback and (now - last_cb_ts) >= CB_INTERVAL:
                 eta_sec = _estimate_eta(queue_history)
@@ -742,23 +888,33 @@ class DreaminaClient:
                 })
                 last_cb_ts = now
             if gs == "success":
-                rc3, out3, _ = _run([
-                    "query_result",
-                    f"--submit_id={sid}",
-                    f"--download_dir={ddir}",
-                ], timeout=180)
-                local = _extract_local_video_path(out3, ddir)
+                # 优先尝试直链下载（实测 12x 提速）
+                video_url = _extract_video_url_from_query(out2)
+                local = None
+                if video_url:
+                    local = _direct_download_video(video_url, ddir, sid)
                 if not local:
-                    return DreaminaResult(
-                        success=False, submit_id=sid, gen_status=gs,
-                        fail_reason=f"success but couldn't locate downloaded mp4 (rc={rc3}); tail: {out3[-300:].strip()}",
-                        raw_stdout_tail=out3[-400:].strip(),
-                        poll_count=polls,
-                    )
+                    logger.info(f"dreamina multimodal2video sid={sid[:8]} fallback to CLI download")
+                    rc3, out3, _ = _run([
+                        "query_result",
+                        f"--submit_id={sid}",
+                        f"--download_dir={ddir}",
+                    ], timeout=180)
+                    local = _extract_local_video_path(out3, ddir)
+                    raw_tail = out3[-400:].strip()
+                    if not local:
+                        return DreaminaResult(
+                            success=False, submit_id=sid, gen_status=gs,
+                            fail_reason=f"success but couldn't locate downloaded mp4 (rc={rc3}); tail: {out3[-300:].strip()}",
+                            raw_stdout_tail=raw_tail,
+                            poll_count=polls,
+                        )
+                else:
+                    raw_tail = out2[-400:].strip()
                 return DreaminaResult(
                     success=True, submit_id=sid, gen_status=gs,
                     local_video_path=local,
-                    raw_stdout_tail=out3[-400:].strip(),
+                    raw_stdout_tail=raw_tail,
                     poll_count=polls,
                 )
             if gs == "fail":
